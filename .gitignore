@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Dataset (downloaded automatically by torchvision)
+data/
+
+# Model weights
+model/
+*.pt
+*.pth
+*.onnx
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+
+# Environments
+.venv/
+venv/
+.ipynb_checkpoints/
