@@ -1,4 +1,4 @@
-from train import WEIGHTS_PATH, get_data
+from train import WEIGHTS_PATH, DATA_DIR, get_data
 
 import torch
 import numpy as np
@@ -21,4 +21,44 @@ def load_quantized(path):
 
 
 
+def load_test_images():
+    test_loader = get_data(DATA_DIR=DATA_DIR)["test_loader"]
 
+    images, labels = [], []
+    for batch, target in test_loader:
+        # (B, 1, 28, 28) -> (B, 784), riga per riga come nn.Flatten
+        images.append(batch.reshape(batch.shape[0], 784).numpy().astype(np.int64))
+        labels.append(target.numpy())
+
+    images = np.concatenate(images)   # forma (10000, 784)
+    labels = np.concatenate(labels)   # forma (10000,)
+
+    assert images.shape == (10000, 784)
+    assert set(np.unique(images)) <= {0, 1}, "Le immagini non sono binarizzate"
+    return images, labels
+
+
+def infer_int(x, q):
+    assert x.shape == (784,), f"Attese 784 posizioni, trovate {x.shape}"
+    assert np.all((x == 0) | (x == 1)), "L'immagine contiene valori diversi da 0 e 1"
+
+
+    acc1 = (q['W1q'] @ x) +q['b1q']
+    acc1_relu = np.maximum(acc1, 0)
+
+    assert np.max(acc1_relu) * q['M0'] + 2**(q['shift']-1) < 2**31
+
+    h_q = (acc1_relu * q['M0'] + 2**(q['shift']-1)) >> q['shift']
+    h_q = np.minimum(h_q, 127)
+
+    acc2 = (q['W2q'] @ h_q) + q['b2q']
+
+    digit = int(np.argmax(acc2))
+
+    return digit, acc1, h_q, acc2
+
+
+q = load_quantized(path=QUANT_PATH)
+images, labels = load_test_images()
+
+print(infer_int(images[0], q))
