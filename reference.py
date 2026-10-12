@@ -1,4 +1,4 @@
-from train import WEIGHTS_PATH, DATA_DIR, get_data
+from train import WEIGHTS_PATH, DATA_DIR, get_data, MLP
 
 import torch
 import numpy as np
@@ -57,8 +57,58 @@ def infer_int(x, q):
 
     return digit, acc1, h_q, acc2
 
+def load_float_model():
+    model = MLP()
+    model.load_state_dict(torch.load(WEIGHTS_PATH, map_location="cpu"))
+    model.eval()
+    return model
 
-q = load_quantized(path=QUANT_PATH)
-images, labels = load_test_images()
+@torch.no_grad()
+def evaluate(images, labels, q):
+    N = images.shape[0]
 
-print(infer_int(images[0], q))
+    # Step 1: predizioni del modello float
+    model = load_float_model()
+    float_logits = model(torch.from_numpy(images).float())   # forma (N, 10)
+    pred_float = float_logits.argmax(dim=1).numpy()          # forma (N,)
+
+    # Step 2: contatori
+    correct_int = 0
+    agreed = 0
+    count_127 = 0
+    max_acc1 = float('-inf')
+
+    # Step 3: riferimento a interi, un'immagine alla volta
+    for i in range(N):
+        digit, acc1, h_q, acc2 = infer_int(images[i], q)
+        if digit == labels[i]:
+            correct_int += 1
+        if digit == pred_float[i]:
+            agreed += 1
+        count_127 += np.count_nonzero(h_q == 127)
+        max_acc1 = max(max_acc1, int(np.max(acc1)))
+
+    # Step 4: risultati
+    return {
+        "acc_float": float(np.mean(pred_float == labels)),
+        "acc_int": correct_int / N,
+        "agreement": agreed / N,
+        "perc_127": count_127 / (N * 32),
+        "max_acc1": max_acc1,
+    }
+
+
+def main():
+    q = load_quantized(QUANT_PATH)
+    images, labels = load_test_images()
+    r = evaluate(images, labels, q)
+
+    print(f"Accuratezza float:   {r['acc_float']:.2%}")
+    print(f"Accuratezza interi:  {r['acc_int']:.2%}")
+    print(f"Accordo float/int:   {r['agreement']:.2%}")
+    print(f"h_q saturati a 127:  {r['perc_127']:.4%}")
+    print(f"Max acc1 osservato:  {r['max_acc1']}  (bound: {q['bound']})")
+
+
+if __name__ == "__main__":
+    main()
