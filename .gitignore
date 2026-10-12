@@ -5,11 +5,24 @@ __pycache__/
 # Dataset (downloaded automatically by torchvision)
 data/
 
-# Model weights
+# Model weights and generated files
 model/
 *.pt
 *.pth
 *.onnx
+*.npz
+weights.bin
+testvec.bin
+
+# C build output (gcc and z88dk)
+build/
+*.o
+*.bin
+*.hex
+*.ihx
+*.map
+*.lis
+test_host
 
 # OS / editor
 .DS_Store
