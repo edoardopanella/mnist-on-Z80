@@ -1,29 +1,29 @@
 """
-export.py - Esporta pesi quantizzati e vettori di test in file binari per il C.
+export.py - Export the quantized weights and the test vectors as binary files for the C code.
 
-Tutti i numeri a piu' byte sono little-endian (il byte meno significativo per
-primo), come sullo Z80. Questo formato va tenuto identico in docs/spec.md.
+All multi-byte numbers are little-endian (least significant byte first), as on the Z80.
+Keep this format identical to the one described in docs/spec.md.
 
-weights.bin  (5 + 25.581 = 25.586 byte)
-    4         byte   firma "Z8NN"
-    1         uint8  versione (1)
-    32 * 784  int8   W1q, riga per riga (prima tutti i pesi del neurone 0)
+weights.bin  (5 + 25,581 = 25,586 bytes)
+    4         bytes  magic "Z8NN"
+    1         uint8  version (1)
+    32 * 784  int8   W1q, row by row (all weights of neuron 0 first)
     32        int32  b1q
     1         int32  M0
     1         uint8  shift
-    10 * 32   int8   W2q, riga per riga
+    10 * 32   int8   W2q, row by row
     10        int32  b2q
 
-testvec.bin  (7 + numero_casi * 985 byte)
-    4         byte   firma "Z8TV"
-    1         uint8  versione (1)
-    1         uint16 numero di casi
-    per ogni caso (985 byte):
-        784   uint8  immagine, 0 o 1, riga per riga (come nn.Flatten)
-        32    int32  acc1, PRIMA della ReLU
-        32    uint8  h_q, tra 0 e 127
+testvec.bin  (7 + n_cases * 985 bytes)
+    4         bytes  magic "Z8TV"
+    1         uint8  version (1)
+    1         uint16 number of cases
+    for each case (985 bytes):
+        784   uint8  image, 0 or 1, row by row (same order as nn.Flatten)
+        32    int32  acc1, BEFORE the ReLU
+        32    uint8  h_q, between 0 and 127
         10    int32  acc2
-        1     uint8  cifra attesa: quella di infer_int, NON l'etichetta MNIST
+        1     uint8  expected digit: the one from infer_int, NOT the MNIST label
 """
 
 import os
@@ -31,39 +31,39 @@ import numpy as np
 
 from reference import QUANT_PATH, load_quantized, load_test_images, infer_int
 
-# --- Percorsi -------------------------------------------------------------
+# --- Paths ----------------------------------------------------------------
 OUT_DIR = os.path.dirname(QUANT_PATH)
 WEIGHTS_BIN = os.path.join(OUT_DIR, "weights.bin")
 TESTVEC_BIN = os.path.join(OUT_DIR, "testvec.bin")
 
-# --- Formato --------------------------------------------------------------
+# --- Format ---------------------------------------------------------------
 WEIGHTS_MAGIC = b"Z8NN"
 TESTVEC_MAGIC = b"Z8TV"
 VERSION = 1
 
 N_IN, N_HID, N_OUT = 784, 32, 10
-N_REAL = 100                      # immagini vere del test set da esportare
+N_REAL = 100                      # real test-set images to export
 
 INT32_MIN, INT32_MAX = -2**31, 2**31 - 1
 
-WEIGHTS_SIZE = (4 + 1                      # firma + versione
+WEIGHTS_SIZE = (4 + 1                      # magic + version
                 + N_HID * N_IN             # W1q
                 + N_HID * 4                # b1q
                 + 4 + 1                    # M0 + shift
                 + N_OUT * N_HID            # W2q
                 + N_OUT * 4)               # b2q
-TESTVEC_HEADER = 4 + 1 + 2                 # firma + versione + numero casi
+TESTVEC_HEADER = 4 + 1 + 2                 # magic + version + number of cases
 RECORD_SIZE = N_IN + N_HID * 4 + N_HID + N_OUT * 4 + 1   # 985
 
 
-# --- Conversioni con controllo dell'intervallo -------------------------------
-# astype() NON segnala errori: un valore fuori intervallo viene "avvolto" e
-# diventa un numero sbagliato in silenzio. Per questo si controlla PRIMA.
+# --- Range-checked conversions ----------------------------------------------
+# astype() does NOT raise errors: an out-of-range value silently "wraps around"
+# and becomes a wrong number. That is why the range is checked BEFORE converting.
 
 def _check_range(name, arr, lo, hi):
     arr = np.asarray(arr)
     if arr.min() < lo or arr.max() > hi:
-        raise ValueError(f"{name} fuori intervallo [{lo}, {hi}]: "
+        raise ValueError(f"{name} out of range [{lo}, {hi}]: "
                          f"min {arr.min()}, max {arr.max()}")
     return arr
 
@@ -80,7 +80,7 @@ def uint8_bytes(name, arr, lo=0, hi=255):
     return _check_range(name, arr, lo, hi).astype(np.uint8).tobytes()
 
 
-# --- Pesi -----------------------------------------------------------------
+# --- Weights ----------------------------------------------------------------
 
 def write_weights(q, path):
     assert q["W1q"].shape == (N_HID, N_IN), q["W1q"].shape
@@ -102,14 +102,14 @@ def write_weights(q, path):
 
 
 def read_weights(path):
-    """Rilegge weights.bin come farebbe il C. Serve solo per i controlli."""
+    """Read weights.bin back the way the C code would. Used only for checks."""
     with open(path, "rb") as f:
         data = f.read()
 
     if len(data) != WEIGHTS_SIZE:
-        raise ValueError(f"weights.bin: attesi {WEIGHTS_SIZE} byte, trovati {len(data)}")
+        raise ValueError(f"weights.bin: expected {WEIGHTS_SIZE} bytes, found {len(data)}")
     if data[:4] != WEIGHTS_MAGIC or data[4] != VERSION:
-        raise ValueError("weights.bin: firma o versione sbagliate")
+        raise ValueError("weights.bin: wrong magic or version")
 
     pos = 5
 
@@ -127,14 +127,14 @@ def read_weights(path):
         "W2q": take(np.int8, N_OUT * N_HID).reshape(N_OUT, N_HID),
         "b2q": take("<i4", N_OUT),
     }
-    assert pos == len(data), "weights.bin: byte avanzati in fondo al file"
+    assert pos == len(data), "weights.bin: leftover bytes at the end of the file"
     return w
 
 
-# --- Casi di test ---------------------------------------------------------
+# --- Test cases -------------------------------------------------------------
 
 def build_test_images(images, q):
-    """Restituisce una lista di (nome, immagine)."""
+    """Return a list of (name, image) pairs."""
     cases = [(f"mnist_{i}", images[i]) for i in range(N_REAL)]
 
     zeros = np.zeros(N_IN, dtype=np.int64)
@@ -143,21 +143,21 @@ def build_test_images(images, q):
     last_pixel = zeros.copy()
     last_pixel[-1] = 1
 
-    # Immagine "peggiore": accende esattamente i pixel con peso positivo del
-    # neurone che ha il massimo acc1 possibile. Porta quel neurone a bound.
+    # "Worst" image: turns on exactly the pixels with a positive weight for the
+    # neuron with the largest possible acc1. It drives that neuron to bound.
     max_acc_per_neuron = np.maximum(q["W1q"], 0).sum(axis=1) + q["b1q"]
     worst_neuron = int(np.argmax(max_acc_per_neuron))
     worst = (q["W1q"][worst_neuron] > 0).astype(np.int64)
 
     cases += [
-        ("tutta_nera", zeros),
-        ("tutta_bianca", np.ones(N_IN, dtype=np.int64)),
-        ("solo_pixel_0", first_pixel),
-        ("solo_pixel_783", last_pixel),
-        (f"peggiore_neurone_{worst_neuron}", worst),
+        ("all_black", zeros),
+        ("all_white", np.ones(N_IN, dtype=np.int64)),
+        ("only_pixel_0", first_pixel),
+        ("only_pixel_783", last_pixel),
+        (f"worst_neuron_{worst_neuron}", worst),
     ]
 
-    # L'immagine peggiore deve davvero raggiungere bound
+    # The worst image must actually reach bound
     _, acc1, _, _ = infer_int(worst, q)
     assert acc1[worst_neuron] == q["bound"], (acc1[worst_neuron], q["bound"])
 
@@ -166,7 +166,7 @@ def build_test_images(images, q):
 
 def write_test_vectors(cases, q, path):
     if len(cases) > 65535:
-        raise ValueError("Troppi casi per un uint16")
+        raise ValueError("Too many cases for a uint16")
 
     with open(path, "wb") as f:
         f.write(TESTVEC_MAGIC)
@@ -175,23 +175,23 @@ def write_test_vectors(cases, q, path):
 
         for name, x in cases:
             digit, acc1, h_q, acc2 = infer_int(x, q)
-            f.write(uint8_bytes(f"{name}: immagine", x, 0, 1))
+            f.write(uint8_bytes(f"{name}: image", x, 0, 1))
             f.write(int32_bytes(f"{name}: acc1", acc1))
             f.write(uint8_bytes(f"{name}: h_q", h_q, 0, 127))
             f.write(int32_bytes(f"{name}: acc2", acc2))
-            f.write(uint8_bytes(f"{name}: cifra", [digit], 0, 9))
+            f.write(uint8_bytes(f"{name}: digit", [digit], 0, 9))
 
 
 def read_test_vectors(path):
-    """Rilegge testvec.bin come farebbe il C. Serve solo per i controlli."""
+    """Read testvec.bin back the way the C code would. Used only for checks."""
     with open(path, "rb") as f:
         data = f.read()
 
     if data[:4] != TESTVEC_MAGIC or data[4] != VERSION:
-        raise ValueError("testvec.bin: firma o versione sbagliate")
+        raise ValueError("testvec.bin: wrong magic or version")
     n = int(np.frombuffer(data, dtype="<u2", count=1, offset=5)[0])
     if len(data) != TESTVEC_HEADER + n * RECORD_SIZE:
-        raise ValueError(f"testvec.bin: dimensione {len(data)} non coerente con {n} casi")
+        raise ValueError(f"testvec.bin: size {len(data)} does not match {n} cases")
 
     records = []
     pos = TESTVEC_HEADER
@@ -212,21 +212,21 @@ def read_test_vectors(path):
     return records
 
 
-# --- Main -----------------------------------------------------------------
+# --- Main -------------------------------------------------------------------
 
 def main():
     q = load_quantized(QUANT_PATH)
     images, _ = load_test_images()
 
-    # 1. Pesi
+    # 1. Weights
     write_weights(q, WEIGHTS_BIN)
     assert os.path.getsize(WEIGHTS_BIN) == WEIGHTS_SIZE
     w = read_weights(WEIGHTS_BIN)
     for name in ("W1q", "b1q", "W2q", "b2q"):
-        assert np.array_equal(w[name], q[name]), f"{name} riletto diverso"
+        assert np.array_equal(w[name], q[name]), f"{name} differs after reading it back"
     assert w["M0"] == q["M0"] and w["shift"] == q["shift"]
 
-    # 2. Vettori di test
+    # 2. Test vectors
     cases = build_test_images(images, q)
     write_test_vectors(cases, q, TESTVEC_BIN)
     records = read_test_vectors(TESTVEC_BIN)
@@ -239,11 +239,11 @@ def main():
         assert np.array_equal(rec["acc2"], acc2), name
         assert rec["digit"] == digit, name
 
-    # 3. Riepilogo
-    print(f"Pesi:  {WEIGHTS_BIN}  ({os.path.getsize(WEIGHTS_BIN)} byte)")
-    print(f"Test:  {TESTVEC_BIN}  ({os.path.getsize(TESTVEC_BIN)} byte, {len(cases)} casi)")
-    print("Casi speciali:", ", ".join(name for name, _ in cases[N_REAL:]))
-    print("Rilettura di entrambi i file: OK")
+    # 3. Summary
+    print(f"Weights: {WEIGHTS_BIN}  ({os.path.getsize(WEIGHTS_BIN)} bytes)")
+    print(f"Tests:   {TESTVEC_BIN}  ({os.path.getsize(TESTVEC_BIN)} bytes, {len(cases)} cases)")
+    print("Special cases:", ", ".join(name for name, _ in cases[N_REAL:]))
+    print("Both files read back correctly: OK")
 
 
 if __name__ == "__main__":
