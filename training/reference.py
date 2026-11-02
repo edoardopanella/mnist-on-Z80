@@ -22,7 +22,7 @@ def load_quantized(path):
 
 
 def load_test_images():
-    test_loader = get_data(DATA_DIR=DATA_DIR)["test_loader"]
+    test_loader = get_data()["test_loader"]
 
     images, labels = [], []
     for batch, target in test_loader:
