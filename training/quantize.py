@@ -52,7 +52,7 @@ def main():
 
     # Quantize the neurons after layer 1
 
-    data = get_data(DATA_DIR=DATA_DIR)
+    data = get_data()
     train_loader = data['train_loader']
 
     h_max = 0
