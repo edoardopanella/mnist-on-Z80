@@ -33,3 +33,6 @@ test_host
 .venv/
 venv/
 .ipynb_checkpoints/
+
+# pdf
+*.pdf
