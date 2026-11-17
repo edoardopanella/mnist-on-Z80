@@ -113,15 +113,7 @@ class Z80NN:
             self.proc.wait()
 
 
-            
-
-    
-
-    
-    
-
-
-
+        
 
 # utility per trasformare un immagine in bytes invece che bits
 
