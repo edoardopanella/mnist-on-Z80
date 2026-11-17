@@ -111,9 +111,7 @@ class Z80NN:
         else:
             self.proc.stdin.close()
             self.proc.wait()
-
-
-        
+   
 
 # utility per trasformare un immagine in bytes invece che bits
 
