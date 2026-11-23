@@ -24,18 +24,18 @@
 0072 F3           di
 0073 31 00 00     ld sp,__register_sp
 0076 21 09 80     ld hl,DATA_8009
-0079 01 4E 01     ld bc,014Dh+1
+0079 01 78 04     ld bc,0477h+1
 007C 1E 00        ld e,00h
 007E CD 72 01     call SUB_0172
 
 0081 21 FF FF     ld hl,0FFFFh
 0084 39           add hl,sp
-0085 01 57 81     ld bc,8157h
+0085 01 81 84     ld bc,8481h
 0088 B7           or a
 0089 ED 42        sbc hl,bc
 008B DA A6 00     jp c,.L1
 
-008E 01 0E 02     ld bc,020Ch+2
+008E 01 0E 02     ld bc,020Eh
 0091 ED 42        sbc hl,bc
 0093 DA A6 00     jp c,.L1
 
@@ -43,11 +43,11 @@
 0099 09           add hl,bc
 009A 44           ld b,h
 009B 4D           ld c,l
-009C 21 57 81     ld hl,8157h
+009C 21 81 84     ld hl,8481h
 009F CD AC 00     call SUB_00AC
 
 00A2 FB           ei
-00A3 CD F1 01     call _main
+00A3 CD C1 02     call _main
 
 00A6 .L1:
 00A6 E5           push hl
@@ -286,7 +286,23 @@
 01A0 37           scf
 01A1 C9           ret
 
-7BD8 DATA_7BD8:
-7BD8 07 00 00...  DEFB 07 00 00 00 00 00 00 00 ; ASCII: ????????
-8009 DATA_8009:
-8009 00 00 00...  DEFB 00 00 00 00 00 00 00 00 ; ASCII: ????????
+846F DATA_846F:
+846F 00 00        DEFB 00 00 ; ASCII: ??
+8471 DATA_8471:
+8471 00 00        DEFB 00 00 ; ASCII: ??
+8473 DATA_8473:
+8473 00 00        DEFB 00 00 ; ASCII: ??
+8475 DATA_8475:
+8475 00 00        DEFB 00 00 ; ASCII: ??
+8477 DATA_8477:
+8477 00 00        DEFB 00 00 ; ASCII: ??
+8479 DATA_8479:
+8479 00 00        DEFB 00 00 ; ASCII: ??
+847B DATA_847B:
+847B 00 00        DEFB 00 00 ; ASCII: ??
+847D DATA_847D:
+847D 00 00        DEFB 00 00 ; ASCII: ??
+847F DATA_847F:
+847F 00           DEFB 00 ; ASCII: ?
+8480 DATA_8480:
+8480 00 00 01...  DEFB 00 00 01 00 FE 00 00 FE ; ASCII: ????????
