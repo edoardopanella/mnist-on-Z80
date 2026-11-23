@@ -1,0 +1,292 @@
+0000 __register_sp:
+0000 F3           di
+0001 ED 56        im 1
+0003 C3 72 00     jp LBL_0072
+
+004F SUB_004F:
+004F 77           ld (hl),a
+0050 23           inc hl
+0051 77           ld (hl),a
+0052 23           inc hl
+
+0053 SUB_0053:
+0053 77           ld (hl),a
+0054 23           inc hl
+0055 77           ld (hl),a
+0056 23           inc hl
+0057 77           ld (hl),a
+0058 23           inc hl
+0059 77           ld (hl),a
+005A 23           inc hl
+005B C9           ret
+
+0072 LBL_0072:
+0072 F3           di
+0073 31 00 00     ld sp,__register_sp
+0076 21 09 80     ld hl,DATA_8009
+0079 01 4E 01     ld bc,014Dh+1
+007C 1E 00        ld e,00h
+007E CD 72 01     call SUB_0172
+
+0081 21 FF FF     ld hl,0FFFFh
+0084 39           add hl,sp
+0085 01 57 81     ld bc,8157h
+0088 B7           or a
+0089 ED 42        sbc hl,bc
+008B DA A6 00     jp c,.L1
+
+008E 01 0E 02     ld bc,020Ch+2
+0091 ED 42        sbc hl,bc
+0093 DA A6 00     jp c,.L1
+
+0096 01 0F 00     ld bc,000Fh
+0099 09           add hl,bc
+009A 44           ld b,h
+009B 4D           ld c,l
+009C 21 57 81     ld hl,8157h
+009F CD AC 00     call SUB_00AC
+
+00A2 FB           ei
+00A3 CD F1 01     call _main
+
+00A6 .L1:
+00A6 E5           push hl
+00A7 F3           di
+00A8 E1           pop hl
+00A9 76           halt
+
+00AA .LOOP:
+00AA 18 FE        jr .LOOP
+
+00AC SUB_00AC:
+00AC 54           ld d,h
+00AD 5D           ld e,l
+00AE E5           push hl
+00AF C5           push bc
+00B0 0E 01        ld c,01h
+00B2 CD 83 01     call SUB_0183
+
+00B5 DA CF 00     jp c,SUB_00CF
+
+00B8 21 06 00     ld hl,0006h
+00BB 19           add hl,de
+00BC EB           ex de,hl
+00BD C1           pop bc
+00BE 09           add hl,bc
+00BF AF           xor a
+00C0 2B           dec hl
+00C1 77           ld (hl),a
+00C2 2B           dec hl
+00C3 77           ld (hl),a
+00C4 EB           ex de,hl
+00C5 73           ld (hl),e
+00C6 23           inc hl
+00C7 72           ld (hl),d
+00C8 23           inc hl
+00C9 CD 53 00     call SUB_0053
+
+00CC E1           pop hl
+00CD C9           ret
+
+00CF SUB_00CF:
+00CF E1           pop hl
+00D0 E1           pop hl
+00D1 2E FF        ld l,0FFh
+00D3 26 00        ld h,00h
+00D5 22 09 80     ld (DATA_8009),hl
+00D8 C3 DF 00     jp SUB_00DF
+
+00DF SUB_00DF:
+00DF 21 00 00     ld hl,0000h
+00E2 37           scf
+00E3 C9           ret
+
+00E9 SUB_00E9:
+00E9 F1           pop af
+00EA E1           pop hl
+00EB D1           pop de
+00EC F5           push af
+00ED C3 FB 00     jp SUB_00FB
+
+00F0 SUB_00F0:
+00F0 F1           pop af
+00F1 D9           exx
+00F2 E1           pop hl
+00F3 D1           pop de
+00F4 D9           exx
+00F5 E1           pop hl
+00F6 D1           pop de
+00F7 F5           push af
+00F8 C3 21 01     jp SUB_0121
+
+00FB SUB_00FB:
+00FB 24           inc h
+00FC 25           dec h
+00FD 28 0B        jr z,.L2
+
+00FF 14           inc d
+0100 15           dec d
+0101 28 06        jr z,.L1
+
+0103 4D           ld c,l
+0104 7C           ld a,h
+0105 06 10        ld b,10h
+0107 18 04        jr .L3
+
+0109 .L1:
+0109 EB           ex de,hl
+
+010A .L2:
+010A 7D           ld a,l
+010B 06 08        ld b,08h
+
+010D .L3:
+010D 21 00 00     ld hl,0000h
+
+0110 .LOOP:
+0110 29           add hl,hl
+0111 CB 11        rl c
+0113 17           rla
+0114 30 01        jr nc,.L4
+
+0116 19           add hl,de
+
+0117 .L4:
+0117 10 F7        djnz .LOOP
+
+0119 B7           or a
+011A C9           ret
+
+011B SUB_011B:
+011B E5           push hl
+011C D9           exx
+011D D1           pop de
+011E C3 58 01     jp SUB_0121.L2
+
+0121 SUB_0121:
+0121 7B           ld a,e
+0122 B2           or d
+0123 D9           exx
+0124 B3           or e
+0125 B2           or d
+0126 28 F3        jr z,SUB_011B
+
+0128 AF           xor a
+0129 E5           push hl
+012A D9           exx
+012B 44           ld b,h
+012C 4D           ld c,l
+012D E1           pop hl
+012E D5           push de
+012F EB           ex de,hl
+0130 6F           ld l,a
+0131 67           ld h,a
+0132 D9           exx
+0133 C1           pop bc
+0134 6F           ld l,a
+0135 67           ld h,a
+0136 78           ld a,b
+0137 06 20        ld b,20h
+
+0139 .LOOP1:
+0139 1F           rra
+013A CB 19        rr c
+013C D9           exx
+013D CB 18        rr b
+013F CB 19        rr c
+0141 30 05        jr nc,.L1
+
+0143 19           add hl,de
+0144 D9           exx
+0145 ED 5A        adc hl,de
+0147 D9           exx
+
+0148 .L1:
+0148 CB 23        sla e
+014A CB 12        rl d
+014C D9           exx
+014D CB 13        rl e
+014F CB 12        rl d
+0151 10 E6        djnz .LOOP1
+
+0153 E5           push hl
+0154 D9           exx
+0155 D1           pop de
+0156 B7           or a
+0157 C9           ret
+
+0158 .L2:
+0158 44           ld b,h
+0159 4D           ld c,l
+015A 3E 10        ld a,10h
+015C 21 00 00     ld hl,0000h
+
+015F .LOOP2:
+015F 29           add hl,hl
+0160 CB 13        rl e
+0162 CB 12        rl d
+0164 D2 6C 01     jp nc,.L3
+
+0167 09           add hl,bc
+0168 D2 6C 01     jp nc,.L3
+
+016B 13           inc de
+
+016C .L3:
+016C 3D           dec a
+016D C2 5F 01     jp nz,.LOOP2
+
+0170 B7           or a
+0171 C9           ret
+
+0172 SUB_0172:
+0172 78           ld a,b
+0173 B1           or c
+0174 7B           ld a,e
+0175 54           ld d,h
+0176 5D           ld e,l
+0177 C8           ret z
+
+0178 77           ld (hl),a
+0179 13           inc de
+017A 0B           dec bc
+017B 78           ld a,b
+017C B1           or c
+017D C8           ret z
+
+017E E5           push hl
+017F ED B0        ldir
+0181 E1           pop hl
+0182 C9           ret
+
+0183 SUB_0183:
+0183 79           ld a,c
+0184 E6 F8        and 0F8h
+0186 20 15        jr nz,.L1
+
+0188 79           ld a,c
+0189 E6 07        and 07h
+018B 28 10        jr z,.L1
+
+018D AF           xor a
+018E CD 4F 00     call SUB_004F
+
+0191 2B           dec hl
+0192 2B           dec hl
+0193 2B           dec hl
+0194 36 FE        ld (hl),0FEh
+0196 2B           dec hl
+0197 2B           dec hl
+0198 71           ld (hl),c
+0199 21 00 00     ld hl,0000h
+019C C9           ret
+
+019D .L1:
+019D 21 01 00     ld hl,0001h
+01A0 37           scf
+01A1 C9           ret
+
+7BD8 DATA_7BD8:
+7BD8 07 00 00...  DEFB 07 00 00 00 00 00 00 00 ; ASCII: ????????
+8009 DATA_8009:
+8009 00 00 00...  DEFB 00 00 00 00 00 00 00 00 ; ASCII: ????????
