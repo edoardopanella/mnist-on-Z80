@@ -26,7 +26,6 @@ test_host
 
 # OS / editor
 .DS_Store
-.vscode/
 .idea/
 
 # Environments
