@@ -1,12 +1,12 @@
 """
 z80debug.py - What the debug panel shows, independent of where the Z80 runs.
 
-    MapSymbols       symbols and memory regions from a z88dk .map file
+    MapSymbols       symbols and memory-map blocks from a z88dk .map file
     Snapshot         one capture: registers, stack, call stack, a memory window, access map
     SnapshotSource   captures through the G and M commands (emulator or board)
     LiveSource       reads the patched z88dk-ticks' shared file (make ticks-viz), any time
 
-A source has capture(view_addr) -> Snapshot. SnapshotSource talks to the Z80,
+A source has capture(view_addr, view_len) -> Snapshot. SnapshotSource talks to the Z80,
 so it must run in the same thread as the other Z80 commands: draw.py runs
 both in its worker thread. LiveSource only reads memory shared with ticks, so
 it can run in Tk's thread while the Z80 works.
@@ -22,13 +22,18 @@ from dataclasses import dataclass
 import numpy as np
 
 READ, WRITE, PROG = 1, 2, 4     # bits of Snapshot.activity, one byte per address
-VIEW_BYTES = 256                # memory window: 16 rows of 16 bytes
+VIEW_BYTES = 256                # memory window, hex view: 16 rows of 16 bytes
+IMG_W = 28                      # image view: pixels per row (the MNIST frame)
 STACK_BYTES = 256               # bytes from SP upwards (= STACK_COPY in z80_serial_main.c)
 LIVE_STACK_BYTES = 1024         # live: free to read, deep enough for main's frame
 MAX_FRAMES = 8                  # call stack depth
 
-# Variables of firmware/z80_serial_main.c shown under the memory bar
+# Variables of firmware/z80_serial_main.c offered in the memory view
 VARIABLES = ("_weights", "_x", "_trace", "_line", "_buf", "_regs")
+# Blocks of the memory map: variable -> what it is for
+BLOCK_TITLES = {"_weights": "Weights", "_x": "Image", "_trace": "Results",
+                "_buf": "Serial", "_line": "Serial", "_stack_copy": "Debug", "_regs": "Debug"}
+FREE_MIN = 1024                 # smaller gaps join a neighbouring block
 
 N_HID, N_OUT = 32, 10           # firmware/nn.h
 TRACE_SIZE = 4 * N_HID + N_HID + 4 * N_OUT     # struct nn_trace: acc1, h_q, acc2
@@ -90,19 +95,85 @@ class MapSymbols:
         later = [a for a, _ in self._named if a > start] + [b for b in self._bounds if b > start]
         return min(later) - start if later else 0
 
-    def regions(self, sp=None):
-        """(label, start, end, level) to draw under the memory bar.
+    def blocks(self, sp=None):
+        """The memory map as named blocks: [(title, start, end)], in address order.
 
-        Level 0: code, data, stack. Level 1: the variables inside data.
+        They cover 0x0000-0xFFFF without gaps. Program, the variables of
+        BLOCK_TITLES (adjacent ones with the same title become one block),
+        Stack. The stack block starts on a 256-byte boundary at least
+        STACK_BYTES below sp, so the next calls' pushes fall inside it (and
+        it moves only now and then). Gaps of FREE_MIN bytes or more are
+        Free; smaller ones join the block before them, or the one after when
+        the block before is Free.
         """
-        out = [("code", *self.code, 0), ("data", *self.data, 0)]
-        if sp is not None and sp < self.stack_top:
-            out.append(("stack", sp, self.stack_top, 0))
-        for name in VARIABLES:
+        if sp is None or not self.data[1] <= sp <= self.stack_top:
+            sp = self.stack_top
+        sp = max(self.data[1], min(self.stack_top - STACK_BYTES, (sp - STACK_BYTES) & ~0xFF))
+        named = [("Program", *self.code)]
+        for name, title in BLOCK_TITLES.items():
             if name in self.addr:
                 start = self.addr[name]
-                out.append((name.lstrip("_"), start, start + self.size_of(name), 1))
-        return out
+                named.append((title, start, start + self.size_of(name)))
+        named.append(("Stack", sp, self.stack_top))
+        named = [b for b in sorted(named, key=lambda b: b[1]) if b[1] < b[2]]
+
+        out = []
+        pos, carry = 0, None            # carry: start of a small gap after Free
+        for title, start, end in named + [(None, 0x10000, 0x10000)]:
+            if start - pos >= FREE_MIN:
+                out.append(["Free", pos, start])
+            elif start > pos:
+                if out and out[-1][0] != "Free":
+                    out[-1][2] = start
+                else:
+                    carry = pos
+            if title is None:
+                break
+            if carry is not None:
+                start, carry = carry, None
+            if out and out[-1][0] == title and out[-1][2] == start:
+                out[-1][2] = end
+            else:
+                out.append([title, start, end])
+            pos = end
+        if out[-1][2] < 0x10000:        # nothing follows the last block
+            out[-1][2] = 0x10000
+        return [tuple(b) for b in out]
+
+    def block_of(self, addr, blocks):
+        """The title of the block holding addr."""
+        for title, start, end in blocks:
+            if start <= addr < end:
+                return title
+        return None
+
+
+def image_bytes(bits, rows=IMG_W):
+    """Bytes the image view needs for rows of IMG_W pixels: one byte or one bit per pixel."""
+    return (rows * IMG_W + 7) // 8 if bits else rows * IMG_W
+
+
+def image_rows(data, bits, rows=IMG_W):
+    """Memory as a picture: (value, offset), both (rows, IMG_W).
+
+    value: the pixel. offset: the byte of data each pixel comes from, for its
+    access colour.
+    bits False: one byte per pixel, as int8: x (the unpacked image) is 0/1,
+    and at weights each 784 bytes are one hidden neuron's W1q row.
+    bits True: one bit per pixel, 0/1, most significant first (buf, the image
+    as the laptop sends it: docs/spec.md, I command). A row is then 3.5 bytes.
+    Pixels past the end of data are 0.
+    """
+    n = rows * IMG_W
+    raw = np.frombuffer(bytes(data), dtype=np.uint8)
+    if bits:
+        value = np.unpackbits(raw)[:n].astype(np.int16)
+        offset = np.arange(n) // 8
+    else:
+        value = raw[:n].view(np.int8).astype(np.int16)
+        offset = np.arange(n)
+    value = np.pad(value, (0, n - len(value)))
+    return value.reshape(rows, IMG_W), offset.reshape(rows, IMG_W)
 
 
 @dataclass
@@ -111,7 +182,7 @@ class Snapshot:
     stack: list             # (address, word) from SP upwards
     frames: list            # call stack, innermost first: (code address, symbol), PC first
     view_addr: int
-    view: bytes             # VIEW_BYTES from view_addr
+    view: bytes             # the memory window: view_len bytes from view_addr
     activity: np.ndarray    # (65536,) uint8, READ | WRITE | PROG bits
     acc2: list              # the 10 output scores, decoded from _trace
     live: bool              # True: real accesses; False: bytes that changed between captures
@@ -136,7 +207,7 @@ class SnapshotSource:
         self.symbols = symbols
         self.previous = {}      # (start, length) -> bytes read at the last capture
 
-    def capture(self, view_addr):
+    def capture(self, view_addr, view_len=VIEW_BYTES):
         sym = self.symbols
         view_addr &= 0xFFFF
         regs = self.z80.registers()
@@ -144,7 +215,7 @@ class SnapshotSource:
         stack_len = max(0, min(STACK_BYTES, sym.stack_top - sp)) & ~1
 
         areas = [(sym[n], sym.size_of(n)) for n in VARIABLES if n in sym.addr and n != "_weights"]
-        areas += [(view_addr, VIEW_BYTES)]
+        areas += [(view_addr, view_len)]
         current = {}
         activity = np.zeros(65536, dtype=np.uint8)
         for start, n in areas:
@@ -168,7 +239,7 @@ class SnapshotSource:
                  for k in range(0, len(stack_bytes), 2)]
         trace = current.get((sym["_trace"], sym.size_of("_trace")), b"") if "_trace" in sym.addr else b""
         return Snapshot(regs, stack, call_stack(regs, stack_bytes, sym), view_addr,
-                        current[(view_addr, VIEW_BYTES)], activity,
+                        current[(view_addr, view_len)], activity,
                         decode_acc2(trace) if len(trace) >= TRACE_SIZE else [], live=False)
 
 
@@ -259,13 +330,30 @@ class LiveSource:
         names = ["af", "bc", "de", "hl", "ix", "iy", "sp", "pc", "af2", "bc2", "de2", "hl2", "i", "r"]
         return tstates, dict(zip(names, words))
 
+    def idle_tstates(self, timeout=0.2):
+        """T-states since ticks started, once they stop moving.
+
+        Between commands the Z80 waits in a blocking read and ticks publishes
+        before it blocks: a reply can reach the laptop just before that last
+        publish, so wait until two reads agree.
+        """
+        last = self._header()[0]
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.005)
+            now = self._header()[0]
+            if now == last:
+                break
+            last = now
+        return last
+
     def read(self, addr, n):
         addr &= 0xFFFF
         if addr + n <= 65536:
             return bytes(self.ram[addr:addr + n])
         return bytes(self.ram[addr:]) + bytes(self.ram[:addr + n - 65536])
 
-    def capture(self, view_addr):
+    def capture(self, view_addr, view_len=VIEW_BYTES):
         sym = self.symbols
         view_addr &= 0xFFFF
         tstates, regs = self._header()
@@ -277,7 +365,7 @@ class LiveSource:
         stack = [(sp + k, stack_bytes[k] | stack_bytes[k + 1] << 8) for k in range(0, stack_len, 2)]
         trace = self.read(sym["_trace"], TRACE_SIZE) if "_trace" in sym.addr else b""
         return Snapshot(regs, stack, call_stack(regs, stack_bytes, sym), view_addr,
-                        self.read(view_addr, VIEW_BYTES), activity,
+                        self.read(view_addr, view_len), activity,
                         decode_acc2(trace) if trace else [], live=True, tstates=tstates)
 
     @property

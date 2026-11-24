@@ -469,7 +469,7 @@ The firmware is an endless loop: read one line, execute the command, reply with 
 | `SnapshotSource` | The board, or the emulator without the patch | After each result: `G`, then `M` for the variables, `stack_copy` and the memory window. Bytes that changed since the previous capture count as writes; there are no reads or instruction fetches (the firmware cannot see its own bus) |
 | `LiveSource` | The emulator with the patched ticks | Reads the live-view file below, any time, also during an inference |
 
-Symbols and regions come from the program's `.map` file (`MapSymbols`). The call stack follows SDCC's frame chain: a function that uses a frame does `push ix; ld ix,0; add ix,sp`, so `(IX)` is the caller's IX and `(IX+2)` the return address. SP and IX can be odd (SDCC sometimes pushes single bytes), so words are read at any offset.
+Symbols and memory-map blocks come from the program's `.map` file (`MapSymbols`). The call stack follows SDCC's frame chain: a function that uses a frame does `push ix; ld ix,0; add ix,sp`, so `(IX)` is the caller's IX and `(IX+2)` the return address. SP and IX can be odd (SDCC sometimes pushes single bytes), so words are read at any offset.
 
 **Live-view file** (normative between `tools/ticks-viz.patch` and `LiveSource`). `z88dk-ticks -shm <file>` creates `<file>` (131,136 bytes) and maps it shared; the host maps it too. Little-endian, the host's byte order:
 

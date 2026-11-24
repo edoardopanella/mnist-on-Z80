@@ -10,6 +10,8 @@ DrawingApp is independent of the Z80: host/demo.py passes a callback that
 sends the image to the board and returns the digit. The callback runs in a
 background thread (Worker), so the window keeps redrawing while the Z80 works;
 an optional side panel (host/debug_panel.py) uses the same thread.
+With on_stop, a slow classification can be stopped: its answer is dropped,
+and a digit asked for meanwhile runs next.
 
 Run `python host/draw.py` to check the preprocessing by eye in the terminal.
 """
@@ -129,13 +131,21 @@ class DrawingApp(tk.Tk):
     side_panel(app) -> tk widget, if given, is placed on the right. It can run
     its own jobs with app.run_in_background, and its refresh() is called after
     each result.
+    on_stop(), if given, adds Stop: it is called in Tk's thread and must make
+    the running on_submit return soon. Its answer is dropped, then
+    on_stopped() is called, before any other job starts. Recognize while the
+    Z80 works stops it and runs the new drawing next; Clear stops it too.
     """
 
-    def __init__(self, on_submit=None, side_panel=None):
+    def __init__(self, on_submit=None, side_panel=None, on_stop=None, on_stopped=None):
         super().__init__()
         self.title("Draw a digit")
         self.on_submit = on_submit
+        self.on_stop = on_stop
+        self.on_stopped = on_stopped
         self.busy = False
+        self.stopping = False
+        self.next_x = None              # drawing to run once the stopped one returns
         self.last_point = None
         self.image = Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)
         self.pen = ImageDraw.Draw(self.image)
@@ -162,6 +172,10 @@ class DrawingApp(tk.Tk):
         buttons.grid(row=1, column=0, columnspan=2)
         self.recognize_button = tk.Button(buttons, text="Recognize", command=self.recognize)
         self.recognize_button.pack(side=tk.LEFT, padx=5)
+        self.stop_button = None
+        if self.on_stop is not None:
+            self.stop_button = tk.Button(buttons, text="Stop", command=self.stop, state=tk.DISABLED)
+            self.stop_button.pack(side=tk.LEFT, padx=5)
         tk.Button(buttons, text="Clear", command=self.clear).pack(side=tk.LEFT, padx=5)
 
         self.result = tk.Label(self, font=("Helvetica", 48, "bold"))
@@ -191,25 +205,63 @@ class DrawingApp(tk.Tk):
         self.last_point = None
 
     def recognize(self):
-        """Preprocess the drawing, show the preview, ask the callback in the background."""
-        if self.busy:
+        """Preprocess the drawing, show the preview, ask the callback in the background.
+
+        While the Z80 works: stop it and run this drawing next (if it can stop).
+        """
+        if self.busy and self.on_stop is None:
             return
         x = preprocess(self.image)
         if x is None:
             self.status.config(text="Draw a digit first")
             return
         self._show_preview(x)
+        if self.busy:
+            self.next_x = x
+            self.stop()
+            return
+        self._submit(x)
+
+    def _submit(self, x):
         self.status.config(text="")
-        if self.on_submit is not None:
-            self.busy = True
+        if self.on_submit is None:
+            return
+        self.busy = True
+        if self.stop_button is None:
             self.recognize_button.config(state=tk.DISABLED)
-            self.status.config(text="The Z80 is working...")
-            self.run_in_background(lambda: self.on_submit(x), self._on_result)
+        else:
+            self.stop_button.config(state=tk.NORMAL)
+        self.status.config(text="The Z80 is working...")
+        self.run_in_background(lambda: self.on_submit(x), self._on_result)
+
+    def stop(self):
+        """Ask the running classification to end; _on_result drops its answer."""
+        if not self.busy or self.stopping or self.on_stop is None:
+            return
+        self.stopping = True
+        self.stop_button.config(state=tk.DISABLED)
+        self.status.config(text="Stopping...")
+        self.on_stop()
 
     def _on_result(self, text, error):
         """Back in Tk's thread: show the answer, then let the panel refresh."""
         self.busy = False
         self.recognize_button.config(state=tk.NORMAL)
+        if self.stop_button is not None:
+            self.stop_button.config(state=tk.DISABLED)
+        if self.stopping:
+            self.stopping = False
+            if self.on_stopped is not None:
+                self.on_stopped()
+            self.result.config(text="")
+            x, self.next_x = self.next_x, None
+            if x is not None:
+                self._submit(x)
+                return
+            self.status.config(text="Stopped: draw another digit")
+            if self.panel is not None:
+                self.panel.refresh()
+            return
         if error is not None:
             self.status.config(text=f"Error: {error}")
             return
@@ -219,13 +271,15 @@ class DrawingApp(tk.Tk):
             self.panel.refresh()
 
     def clear(self):
-        """Erase the drawing, the preview and the result."""
+        """Erase the drawing, the preview and the result; stop the Z80 if it works."""
         self.canvas.delete("all")
         self.pen.rectangle([0, 0, CANVAS_SIZE, CANVAS_SIZE], fill=0)
         self.last_point = None
         self._show_preview(np.zeros(FRAME_SIZE * FRAME_SIZE, dtype=np.uint8))
         self.result.config(text="")
         self.status.config(text="Draw a digit, then press Enter")
+        self.next_x = None
+        self.stop()
 
     def _show_preview(self, x):
         """Show x in the preview label (keep a reference so Tk does not drop it)."""

@@ -100,9 +100,19 @@ def main():
             p = DebugPanel(app, symbols, source.capture, app.run_in_background, note=note,
                            live=source if live else None)
             p.refresh()                     # memory map and registers before the first digit
+            panels.append(p)
             return p
 
-        DrawingApp(on_submit=lambda x: str(z80.classify_debug(x)[0]), side_panel=panel).mainloop()
+        # Stop (live only): the inference finishes at full speed and its answer is dropped
+        panels = []
+        stop = dict(on_stop=lambda: panels[0].fast_forward(),
+                    on_stopped=lambda: panels[0].restore_clock()) if live else {}
+        def classify(x):
+            if live:
+                panels[0].start_digit()     # the T-states count restarts for this digit
+            return str(z80.classify_debug(x)[0])
+
+        DrawingApp(on_submit=classify, side_panel=panel, **stop).mainloop()
     finally:
         if live and source is not None:
             source.paused = False           # a paused ticks would not see the end of input

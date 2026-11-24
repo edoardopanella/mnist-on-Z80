@@ -143,6 +143,34 @@ def test_speed_holds_the_clock(live):
     assert 1.2 < mhz < 2.3, mhz
 
 
+def test_tstates_per_digit(live):
+    """What the panel's "This digit" count shows: about 5 M T-states, the same each time."""
+    z80, src = live
+    x = records()[2]["x"]
+    costs = []
+    for _ in range(2):
+        t0 = src.idle_tstates()
+        z80.classify_debug(x)
+        costs.append(src.idle_tstates() - t0)
+    assert 3_000_000 < costs[0] < 8_000_000, costs
+    assert abs(costs[0] - costs[1]) < 5_000, costs
+
+
+def test_image_view_of_x_and_buf(live):
+    """Live, nothing touches buf after I/D: the image view shows the digit in x and in buf."""
+    from z80debug import image_bytes, image_rows
+
+    z80, src = live
+    sym = src.symbols
+    case = records()[4]
+    z80.classify_debug(case["x"])
+    expected = np.asarray(case["x"]).reshape(28, 28)
+    x = src.capture(sym["_x"], image_bytes(False)).view
+    buf = src.capture(sym["_buf"], image_bytes(True)).view
+    assert (image_rows(x, bits=False)[0] == expected).all()
+    assert (image_rows(buf, bits=True)[0] == expected).all()
+
+
 def test_pause_stops_between_instructions(live):
     z80, src = live
     rec = records()[3]
