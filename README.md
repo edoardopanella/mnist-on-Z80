@@ -1,36 +1,74 @@
 # MNIST on Z80
 
-Handwritten digit recognition (MNIST) with a small neural network running on a Z80 computer built on a breadboard (Grant Searle's design). The network is trained in floating point on a laptop, converted to integers only, and then executed in C on the Z80.
+Handwritten digit recognition on a Z80. A 784 → 32 → 10 MLP is trained in floating point with PyTorch, converted to integer-only arithmetic, and run in C on the Z80. The emulator is DeZog's zsim; the hardware target is Grant Searle's breadboard Z80. The C code must reproduce the Python integer reference bit for bit.
 
-## Python pipeline
-
-Run the scripts in this order; each one uses the files produced by the previous one.
+## Layout
 
 ```
-python train.py       # -> model/mlp.pt
-python quantize.py    # -> model/quantized.npz
-python reference.py   # prints the accuracies
-python export.py      # -> model/weights.bin, model/testvec.bin
+training/   Python pipeline: train → quantize → check → export
+firmware/   C inference library and Z80 programs
+host/       laptop tools: drawing app, Z80 link library, DeZog UI
+tests/      pytest tests and DeZog input generator
+docs/       spec.md (formats and algorithm), plan.md, toolchain guide
+artifacts/  generated files (MNIST data, weights, test vectors), not committed
 ```
 
-### `train.py`
+## 1. Training pipeline
 
-Trains a 784 → 32 → 10 MLP (ReLU) on MNIST with PyTorch, using binarized images: every pixel is 0 or 1, exactly as the Z80 will receive it. It uses Adam, batches of 64 and 10 epochs, and saves the floating-point weights to `model/mlp.pt`. It also defines `get_data()` and the `MLP` class, which the other scripts reuse.
+Run from the repository root, in this order. Each step reads what the previous one wrote to `artifacts/`.
 
-### `quantize.py`
+```
+python training/train.py       # -> artifacts/mlp.pt
+python training/quantize.py    # -> artifacts/quantized.npz
+python training/reference.py   # prints float vs integer accuracy
+python training/export.py      # -> artifacts/weights.bin, artifacts/testvec.bin
+```
 
-Converts the weights to integers: `int8` weights with symmetric quantization (one scale per layer) and `int32` biases expressed in the scale of their accumulator. It calibrates the scale of the layer-1 activations on the training set and computes `M0` and `shift`, the two integers that replace the multiplication by a decimal number between the two layers. `shift` is chosen as large as possible without 32-bit overflow for any image, using the theoretical maximum of the accumulator (`bound`). Everything is saved to `model/quantized.npz`.
+| File | What it does |
+| --- | --- |
+| `train.py` | Downloads MNIST and binarizes it (pixel = 1 if > 0.5). Trains the MLP (Adam, lr 1e-3, batch 64, 10 epochs, seed 0) and saves the float weights. Also defines `MLP`, `get_data()` and the paths that the other scripts import. |
+| `quantize.py` | Quantizes weights to `int8` (symmetric, one scale per layer) and biases to `int32`. Calibrates the hidden-layer scale on the training set. Replaces the float rescale between the layers with an integer multiply `M0` and a right `shift`, choosing the largest `shift` that cannot overflow 32 bits. |
+| `reference.py` | `infer_int()` is the integer-only network, computed step by step exactly as the C code does: layer 1, ReLU, requantize, layer 2, argmax. `evaluate()` compares it with the float model. |
+| `export.py` | Writes little-endian binaries for the C code: `weights.bin` with the weights, and `testvec.bin` with 105 test cases (100 MNIST images plus 5 edge cases). Each case stores the image and every intermediate value. The script reads both files back to check them. Formats: `docs/spec.md` §5. |
 
-### `reference.py`
+Test-set results: float 96.01%, integer 95.96%, float/integer agreement 99.67%.
 
-The executable specification of the integer network. `infer_int()` runs one image using the same integer operations the Z80 will perform (sum of weights, ReLU, requantization with `M0` and `shift`, layer 2, argmax) and also returns the intermediate values. `evaluate()` compares the integer version with the floating-point model on the test set.
+## 2. Inference on the Z80
 
-Current results on the test set: floating-point accuracy 96.01%, integer accuracy 95.96%, agreement between the two versions 99.67%.
+| File | What it does |
+| --- | --- |
+| `firmware/nn.h`, `nn.c` | `nn_infer()` is the C version of `infer_int()`. It uses only fixed-width types, so it is correct with the Z80's 16-bit `int`. Because the inputs are binary, layer 1 needs only additions. `struct nn_weights` has the same layout as the `weights.bin` payload. |
+| `firmware/z80_test_main.c` | Toolchain sanity check: writes a fixed value to a mailbox at `0xF000`. |
+| `firmware/z80_nn_main.c` | Runs `nn_infer` on one test case loaded into memory. Writes to the mailbox whether `acc1`, `h_q`, `acc2` and the digit all match `testvec.bin`. |
+| `firmware/z80_draw_main.c` | Interactive firmware. It reads a packed image from simulated I/O ports, runs `nn_infer`, and sends back the digit, the activations and a register snapshot. |
 
-### `export.py`
+Build with z88dk (the command is in the header of `z80_draw_main.c`; use the same flags for the other programs):
 
-Translates the Python results into little-endian binary files that the C code can read byte by byte. `weights.bin` holds the quantized weights; `testvec.bin` holds 105 test images (100 from MNIST and 5 edge cases) with all the intermediate values computed by `infer_int()`, which the C code must reproduce bit for bit. The script reads both files back to verify them. The exact format is described at the top of the file and in `docs/spec.md`.
+```
+zcc +z80 -compiler=sdcc -m --list --c-code-in-asm -pragma-define:CRT_MODEL=0 \
+    -o build/draw.bin firmware/z80_draw_main.c firmware/nn.c
+```
 
-## Generated files
+Memory map: code at `0x0000`, weights at `0x1000`, test case at `0x7800`, variables from `0x8000`, mailbox at `0xF000`.
 
-`data/`, `model/mlp.pt`, `model/quantized.npz`, `model/weights.bin` and `model/testvec.bin` are regenerated by the scripts and should not be committed (see `.gitignore`).
+Running in the DeZog emulator:
+
+1. `python tests/make_dezog_inputs.py [case]` writes `build/weights_payload.bin` (loaded at `0x1000`) and `build/case.bin` (loaded at `0x7800`).
+2. Run `z80_nn_main` and read the result in the mailbox, or run `z80_draw_main` with the custom UI in `host/dezog/`. `draw_ui.html` is the drawing panel; `draw_logic.js` simulates the I/O ports.
+
+## 3. Host tools
+
+| File | What it does |
+| --- | --- |
+| `host/draw.py` | Tkinter drawing canvas. `preprocess()` reproduces MNIST's framing: crop, scale to 20 px, center of mass at (14, 14) in 28×28, binarize. `python host/draw.py` prints the resulting image as ASCII. |
+| `host/z80nn.py` | `Z80NN` talks to a local executable, the `z88dk-ticks` emulator, or the board over serial (`pyserial`). It speaks the line protocol of `docs/spec.md` §7.5: version, weight upload with checksum, classify, classify with debug output. |
+
+## Tests
+
+```
+python -m pytest tests/      # preprocessing tests for host/draw.py
+```
+
+## Requirements
+
+Python 3 with `torch`, `torchvision`, `numpy`, `pillow`, `pytest` (and `pyserial` for the board). z88dk and VS Code with DeZog for the Z80 part; see `docs/z80-toolchain-macos-guide.md`.
