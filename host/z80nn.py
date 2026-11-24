@@ -18,7 +18,9 @@ class Z80NN:
 
         elif target == "emu":
             # uguale a prima ma il programma che lancia è l'emulator
-            self.proc = subprocess.Popen(["z88dk-ticks", "-pc", "0x9000", where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            # where = build/emu.bin (make emu, +test target, starts at 0x0000).
+            # -counter: ticks quits after 1e8 T-states by default, about 10 inferences
+            self.proc = subprocess.Popen(["z88dk-ticks", "-counter", "100000000000", where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
         elif target == "board":
             import serial # usa porte seriali, ovvero USB
