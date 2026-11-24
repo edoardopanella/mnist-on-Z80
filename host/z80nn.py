@@ -4,6 +4,7 @@ e la scheda z80
 '''
 
 
+import os
 import subprocess # È un modulo già incluso in Python (non va installato) che serve a lanciare altri programmi dall’interno di uno script Python. È come se Python aprisse un terminale, scrivesse il nome di un programma e premesse Invio al posto vostro.
 import numpy as np
 
@@ -18,9 +19,11 @@ class Z80NN:
 
         elif target == "emu":
             # uguale a prima ma il programma che lancia è l'emulator
-            # where = build/emu.bin (make emu, +test target, starts at 0x0000).
+            # where = build/emu.bin (make emu) or build/board.rom (make rom, ACIA emulated by ticks).
             # -counter: ticks quits after 1e8 T-states by default, about 10 inferences
-            self.proc = subprocess.Popen(["z88dk-ticks", "-counter", "100000000000", where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            # -lua: flushes the emulated ACIA's output (see ticks_acia.lua)
+            lua = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ticks_acia.lua")
+            self.proc = subprocess.Popen(["z88dk-ticks", "-counter", "100000000000", "-lua", lua, where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
         elif target == "board":
             import serial # usa porte seriali, ovvero USB

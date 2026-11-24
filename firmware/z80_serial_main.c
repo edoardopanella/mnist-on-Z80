@@ -8,9 +8,12 @@
  *   D <196 hex>        -> "A1 ...", "H ...", "A2 ...", "R d"
  * Errors: ERR CMD, ERR HEX, ERR LEN, ERR OFS, ERR LONG. The program keeps running.
  *
- * I/O goes through the console: fgetc_cons() reads without echo (getchar()
- * would echo every byte back into the replies). Under z88dk-ticks (make emu)
- * the console is the emulator's stdin/stdout.
+ * Two builds, same protocol; only ser_init/ser_getc/ser_putc differ:
+ *   make emu   zcc +test, runs in z88dk-ticks: characters are the emulator's stdin/stdout
+ *   make rom   zcc +z80, ROM image for the board: characters go through the MC6850 ACIA
+ *
+ * Board memory map: code in ROM from 0x0000, variables in RAM from 0x8000
+ * (weights 25,581 bytes + buffers, about 27 KB), stack below 0xFFFF.
  */
 #include <stdint.h>
 #include <stdio.h>
@@ -30,12 +33,52 @@ static uint8_t x[N_IN];
 static uint8_t buf[MAX_CHUNK > IMG_BYTES ? MAX_CHUNK : IMG_BYTES];
 static char line[LINE_MAX + 1];
 
+/* --- Serial I/O ------------------------------------------------------------ */
+
+#ifdef __TESTTARGET__               /* defined by zcc +test (make emu) */
+
+static void ser_init(void) {}
+static int ser_getc(void) { return fgetc_cons(); }      /* no echo, unlike getchar() */
+static void ser_putc(char c) { fputc_cons(c); }
+
+#else                               /* the board (make rom) */
+
+__sfr __at 0x80 ACIA_CTRL;          /* write: control register, read: status register */
+__sfr __at 0x81 ACIA_DATA;
+
+#define ACIA_RESET   0x03           /* master reset */
+#define ACIA_CONFIG  0x16           /* clock / 64, 8N1, RTS low, no interrupts:
+                                       7.3728 MHz / 64 = 115,200 baud (Searle's crystal) */
+#define ACIA_RX_FULL  0x01          /* status bit 0: a byte has arrived */
+#define ACIA_TX_EMPTY 0x02          /* status bit 1: ready to send (also needs CTS low) */
+
+static void ser_init(void)
+{
+    ACIA_CTRL = ACIA_RESET;
+    ACIA_CTRL = ACIA_CONFIG;
+}
+
+/* Polling is enough: the host sends one line, then waits for the reply. */
+static int ser_getc(void)
+{
+    while ((ACIA_CTRL & ACIA_RX_FULL) == 0) {}
+    return ACIA_DATA;
+}
+
+static void ser_putc(char c)
+{
+    while ((ACIA_CTRL & ACIA_TX_EMPTY) == 0) {}
+    ACIA_DATA = c;
+}
+
+#endif
+
 /* --- Output ---------------------------------------------------------------- */
 
 static void put_str(const char *s)
 {
     while (*s)
-        fputc_cons(*s++);
+        ser_putc(*s++);
 }
 
 static void put_hex4(uint16_t v)
@@ -43,7 +86,7 @@ static void put_hex4(uint16_t v)
     static const char digits[] = "0123456789ABCDEF";
     int8_t sh;
     for (sh = 12; sh >= 0; sh -= 4)
-        fputc_cons(digits[(v >> sh) & 0x0F]);
+        ser_putc(digits[(v >> sh) & 0x0F]);
 }
 
 /* Decimal int32 without printf (smaller, and no %ld support to configure). */
@@ -54,7 +97,7 @@ static void put_i32(int32_t v)
     uint32_t u = (uint32_t)v;
 
     if (v < 0) {
-        fputc_cons('-');
+        ser_putc('-');
         u = 0 - u;
     }
     do {
@@ -62,7 +105,7 @@ static void put_i32(int32_t v)
         u /= 10;
     } while (u != 0);
     while (n)
-        fputc_cons(d[--n]);
+        ser_putc(d[--n]);
 }
 
 static void put_list(const char *label, const int32_t *v, uint8_t n)
@@ -70,16 +113,16 @@ static void put_list(const char *label, const int32_t *v, uint8_t n)
     uint8_t i;
     put_str(label);
     for (i = 0; i < n; i++) {
-        fputc_cons(' ');
+        ser_putc(' ');
         put_i32(v[i]);
     }
-    fputc_cons('\n');
+    ser_putc('\n');
 }
 
 static void reply(const char *s)
 {
     put_str(s);
-    fputc_cons('\n');
+    ser_putc('\n');
 }
 
 /* --- Input ----------------------------------------------------------------- */
@@ -92,7 +135,7 @@ static int16_t read_line(void)
     int c;
 
     for (;;) {
-        c = fgetc_cons();
+        c = ser_getc();
         if (c == EOF)
             return -2;
         if (c == '\n')
@@ -165,7 +208,7 @@ static void cmd_checksum(void)
         sum += p[i];
     put_str("C ");
     put_hex4(sum);
-    fputc_cons('\n');
+    ser_putc('\n');
 }
 
 /* "I <hex>" / "D <hex>": arg points at the hex digits. */
@@ -197,14 +240,15 @@ static void cmd_infer(const char *arg, uint8_t len, uint8_t debug)
         put_list("A2", trace.acc2, N_OUT);
     }
     put_str("R ");
-    fputc_cons((char)('0' + digit));
-    fputc_cons('\n');
+    ser_putc((char)('0' + digit));
+    ser_putc('\n');
 }
 
 int main(void)
 {
     int16_t len;
 
+    ser_init();
     for (;;) {
         len = read_line();
         if (len == -2)

@@ -41,15 +41,19 @@ Test-set results: float 96.01%, integer 95.96%, float/integer agreement 99.67%.
 | `firmware/z80_test_main.c` | Toolchain sanity check: writes a fixed value to a mailbox at `0xF000`. |
 | `firmware/z80_nn_main.c` | Runs `nn_infer` on one test case loaded into memory. Writes to the mailbox whether `acc1`, `h_q`, `acc2` and the digit all match `testvec.bin`. |
 | `firmware/z80_draw_main.c` | Interactive firmware for DeZog. It reads a packed image from simulated I/O ports, runs `nn_infer`, and sends back the digit, the activations and a register snapshot. |
-| `firmware/z80_serial_main.c` | Line-protocol firmware (`docs/spec.md` §7.5), the Z80 side of `host/z80nn.py`. Commands: `V` version, `W` weight chunk, `C` checksum, `I` classify, `D` classify with intermediate values. Console I/O, so under `z88dk-ticks` it uses stdin and stdout. |
+| `firmware/z80_serial_main.c` | Line-protocol firmware (`docs/spec.md` §7.5), the Z80 side of `host/z80nn.py`. Commands: `V` version, `W` weight chunk, `C` checksum, `I` classify, `D` classify with intermediate values. Two builds differ only in how characters move. `make emu` (`build/emu.bin`) uses the console of the `z88dk-ticks` emulator. `make rom` (`build/board.rom`, the EEPROM image) polls the board's MC6850 ACIA at ports `0x80`/`0x81` (115,200 baud with the 7.3728 MHz crystal). |
 
-### Demo: draw on the laptop, classify on the emulated Z80
+### Demo: draw on the laptop, classify on the Z80
 
 ```
-make demo    # builds build/emu.bin, runs host/demo.py
+make demo                                  # emulator: builds build/emu.bin, runs host/demo.py
+make rom                                   # board: write build/board.rom to the EEPROM, then
+make demo PORT=/dev/tty.usbserial-XXXX     #        same window, classified by the board
 ```
 
-`host/demo.py` starts `z88dk-ticks` through `Z80NN`, uploads the weights, checks the checksum, and opens the drawing window. Each "Recognize" sends the image to the Z80, which returns the digit. One classification costs about 5M T-states, roughly 1.3 s on a real 4 MHz Z80.
+`host/demo.py` connects through `Z80NN`, uploads the weights, checks the checksum, and opens the drawing window. Each "Recognize" sends the image to the Z80, which returns the digit. One classification costs about 5M T-states, roughly 0.7 s at 7.3728 MHz.
+
+Board memory: code in ROM from `0x0000` (about 3.6 KB); weights and buffers in RAM from `0x8000` to `0xE97D`; stack below `0xFFFF`. Interrupts stay off.
 
 ### DeZog
 
@@ -72,6 +76,7 @@ The "Z80 draw UI" config loads the custom UI in `host/dezog/`: `draw_ui.html` is
 | `host/draw.py` | Tkinter drawing canvas. `preprocess()` reproduces MNIST's framing: crop, scale to 20 px, center of mass at (14, 14) in 28×28, binarize. `python host/draw.py` prints the resulting image as ASCII. |
 | `host/z80nn.py` | `Z80NN` talks to a local executable, the `z88dk-ticks` emulator, or the board over serial (`pyserial`). It speaks the line protocol of `docs/spec.md` §7.5: version, weight upload with checksum, classify, classify with debug output. |
 | `host/demo.py` | Connects `DrawingApp` to `Z80NN`. `python host/demo.py` uses the emulator; `python host/demo.py board <port>` uses the board. |
+| `host/ticks_acia.lua` | Port hook that `Z80NN` passes to `z88dk-ticks`. It flushes the emulated ACIA's output, so `build/board.rom` can also run in the emulator. |
 
 ## Tests
 
@@ -80,7 +85,7 @@ make test     # pytest: preprocessing tests, and all 105 test vectors through z8
 make check    # integer reference vs float model
 ```
 
-`tests/test_emu.py` needs `make emu` and skips itself if `z88dk-ticks` or `build/emu.bin` is missing.
+`tests/test_emu.py` runs the 105 vectors against both builds, `build/emu.bin` and `build/board.rom`, so the EEPROM image is tested before it is written. It skips any build that is missing (`make emu rom`).
 
 ## Requirements
 

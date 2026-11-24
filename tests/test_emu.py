@@ -1,8 +1,10 @@
 """End-to-end: host/z80nn.py <-> firmware/z80_serial_main.c in z88dk-ticks.
 
 Every case of artifacts/testvec.bin must match bit for bit (acc1, h_q, acc2,
-digit). Needs `make emu` and `make` artifacts; skipped otherwise.
-Run with: pytest tests/test_emu.py
+digit). Runs twice:
+    build/emu.bin     make emu, console I/O
+    build/board.rom   make rom, the EEPROM image; ticks emulates the ACIA at 0x80/0x81
+A build that is missing is skipped. Run with: pytest tests/test_emu.py
 """
 
 import os
@@ -17,22 +19,29 @@ sys.path.insert(0, os.path.join(ROOT, "training"))
 from z80nn import Z80NN  # noqa: E402
 
 EMU_BIN = os.path.join(ROOT, "build", "emu.bin")
+BOARD_ROM = os.path.join(ROOT, "build", "board.rom")
 WEIGHTS = os.path.join(ROOT, "artifacts", "weights.bin")
 TESTVEC = os.path.join(ROOT, "artifacts", "testvec.bin")
 
 pytestmark = pytest.mark.skipif(
     shutil.which("z88dk-ticks") is None
-    or not all(os.path.exists(p) for p in (EMU_BIN, WEIGHTS, TESTVEC)),
-    reason="needs z88dk-ticks, build/emu.bin (make emu) and artifacts/",
+    or not all(os.path.exists(p) for p in (WEIGHTS, TESTVEC)),
+    reason="needs z88dk-ticks and artifacts/",
 )
 
 
-@pytest.fixture(scope="module")
-def z80():
-    z = Z80NN("emu", EMU_BIN)
+@pytest.fixture(scope="module", params=[EMU_BIN, BOARD_ROM], ids=["emu", "board-rom"])
+def z80(request):
+    if not os.path.exists(request.param):
+        pytest.skip(f"{os.path.relpath(request.param, ROOT)} not built")
+    z = Z80NN("emu", request.param)
     z.load_weights(WEIGHTS)          # raises on a checksum mismatch
     yield z
-    z.close()
+    if request.param == BOARD_ROM:
+        z.proc.kill()                # the ROM waits for input forever, like the board
+        z.proc.wait()
+    else:
+        z.close()
 
 
 def test_version(z80):
