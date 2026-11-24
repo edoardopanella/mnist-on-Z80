@@ -5,12 +5,21 @@ e la scheda z80
 
 
 import os
+import pty
 import subprocess # È un modulo già incluso in Python (non va installato) che serve a lanciare altri programmi dall’interno di uno script Python. È come se Python aprisse un terminale, scrivesse il nome di un programma e premesse Invio al posto vostro.
+import tty
+
 import numpy as np
 
+# Order of the G reply = struct regs in firmware/snapregs.h
+REG_NAMES = ["af", "bc", "de", "hl", "ix", "iy", "sp", "pc", "af2", "bc2", "de2", "hl2", "i", "r"]
+MAX_CHUNK = 64      # bytes per W or M line
+
 class Z80NN:
-    def __init__(self, target, where):
+    def __init__(self, target, where, ticks="z88dk-ticks", shm=None):
         # target: "local" (programma sul mac), "emu" (emulatore), "board" (la scheda)
+        # emu only: ticks = the emulator to run; shm = file for the live view, which
+        # needs the patched ticks (make ticks-viz, see host/z80debug.py LiveSource)
         self.target = target
 
         if target == "local":
@@ -21,9 +30,15 @@ class Z80NN:
             # uguale a prima ma il programma che lancia è l'emulator
             # where = build/emu.bin (make emu) or build/board.rom (make rom, ACIA emulated by ticks).
             # -counter: ticks quits after 1e8 T-states by default, about 10 inferences
-            # -lua: flushes the emulated ACIA's output (see ticks_acia.lua)
-            lua = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ticks_acia.lua")
-            self.proc = subprocess.Popen(["z88dk-ticks", "-counter", "100000000000", "-lua", lua, where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+            # stdout is a pseudo-terminal, not a pipe: ticks' emulated ACIA never flushes,
+            # and only on a terminal does the C library flush at every '\n'.
+            master, slave = pty.openpty()
+            tty.setraw(slave)       # no '\n' -> '\r\n' translation, no echo
+            live = ["-shm", shm] if shm else []
+            self.proc = subprocess.Popen([ticks, "-counter", "100000000000", *live, where],
+                                         stdin=subprocess.PIPE, stdout=slave, text=True)
+            os.close(slave)
+            self.out = os.fdopen(master, "r", encoding="ascii", newline="")
 
         elif target == "board":
             import serial # usa porte seriali, ovvero USB
@@ -44,6 +59,11 @@ class Z80NN:
     def _read_line(self):
         if self.target == "board":
             line = self.port.readline().decode("ascii")
+        elif self.target == "emu":
+            try:
+                line = self.out.readline()
+            except OSError:         # the pty reports EIO once ticks has exited
+                line = ""
         else:
             line = self.proc.stdout.readline()
         if line == "":
@@ -100,6 +120,27 @@ class Z80NN:
         digit = self._read_numbers("R", 1)[0]
         return digit, acc1, h_q, acc2
 
+    # Debug: register snapshot and memory reads (G and M commands)
+
+    def registers(self):
+        """Registers snapped right after the last I/D, as {name: int} (REG_NAMES)."""
+        parts = self.send("G").split()
+        if parts[0] != "G" or len(parts) != len(REG_NAMES) + 1:
+            raise RuntimeError(f"unexpected answer: {' '.join(parts)!r}")
+        return {name: int(v, 16) for name, v in zip(REG_NAMES, parts[1:])}
+
+    def read_memory(self, addr, n):
+        """n bytes of Z80 memory from addr (wraps at 0xFFFF), in 64-byte M commands."""
+        data = bytearray()
+        while len(data) < n:
+            k = min(MAX_CHUNK, n - len(data))
+            a = (addr + len(data)) & 0xFFFF
+            parts = self.send(f"M {a:04X} {k:02X}").split()
+            if parts[0] != "M" or len(parts) != 2 or len(parts[1]) != 2 * k:
+                raise RuntimeError(f"unexpected answer: {' '.join(parts)!r}")
+            data += bytes.fromhex(parts[1])
+        return bytes(data)
+
     def _read_numbers(self, label, count):
         # legge una riga tipo "A1 323 420 -193 ..." e restituisce i numeri
         line = self._read_line()
@@ -114,8 +155,14 @@ class Z80NN:
             self.port.close()
 
         else:
-            self.proc.stdin.close()
-            self.proc.wait()
+            self.proc.stdin.close()     # emu.bin exits at end of input...
+            try:
+                self.proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()        # ...board.rom polls the ACIA forever, like the board
+                self.proc.wait()
+            if self.target == "emu":
+                self.out.close()
    
 
 # utility per trasformare un immagine in bytes invece che bits

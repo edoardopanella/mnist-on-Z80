@@ -1,7 +1,7 @@
 import torch
 import numpy as np
 import os
-from train import MLP, get_data, WEIGHTS_PATH, DATA_DIR
+from train import MLP, get_data, WEIGHTS_PATH
 
 QUANT_PATH = os.path.join(os.path.dirname(WEIGHTS_PATH), "quantized.npz")
 

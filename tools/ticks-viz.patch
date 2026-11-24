@@ -1,0 +1,298 @@
+diff -ruN a/src/ticks/Makefile b/src/ticks/Makefile
+--- a/src/ticks/Makefile	2026-11-24 12:54:07
++++ b/src/ticks/Makefile	2026-11-24 12:53:29
+@@ -5,7 +5,7 @@
+ 	hook_cpm.o hook_console.o hook_io.o hook_misc.o hook.o debugger.o breakpoints.o \
+ 	profiler.o exp_engine.o debugger_ticks.o linenoise.o utf8.o syms.o \
+ 	disassembler_alg.o memory.o am9511.o acia.o hook_rc2014.o debug.o srcfile.o \
+-	i8255.o ticks_main.o \
++	i8255.o ticks_main.o viz.o \
+ 	../common/dirname.o $(UNIXem_OBJS)
+ GDBOBJS = cpu.o backend.o syms.o disassembler_alg.o debug.o exp_engine.o debugger.o breakpoints.o profiler.o debugger_gdb.o debugger_mi2.o debugger_gdb_packets.o linenoise.o srcfile.o ../common/dirname.o sxmlc.o sxmlsearch.o $(UNIXem_OBJS)
+ DISOBJS = disassembler_main.o syms.o disassembler_alg.o debug.o exp_engine.o backend.o
+diff -ruN a/src/ticks/hook_console.c b/src/ticks/hook_console.c
+--- a/src/ticks/hook_console.c	2026-11-24 12:54:07
++++ b/src/ticks/hook_console.c	2026-11-24 12:53:36
+@@ -1,5 +1,6 @@
+ 
+ #include "ticks.h"
++#include "viz.h"
+ 
+ #include <stdio.h>
+ #ifndef WIN32
+@@ -46,6 +47,7 @@
+ int getch()
+ {
+     int val;
++    if (viz) viz_idle();
+     struct termios old_kbd_mode;    /* orig keyboard settings   */
+     struct termios new_kbd_mode;
+ 
+@@ -109,8 +111,10 @@
+     int val;
+     if (isatty(fileno(stdin)))
+         val = getch();          // read one character at a time if connected to a tty
+-    else
++    else {
++        if (viz) viz_idle();
+         val = getchar();        // read in cooked mode if redirected from a file
++    }
+ 
+     if ( val != -1 ) {
+         l = val % 256;
+diff -ruN a/src/ticks/memory.c b/src/ticks/memory.c
+--- a/src/ticks/memory.c	2026-11-24 12:54:07
++++ b/src/ticks/memory.c	2026-11-24 12:53:29
+@@ -3,6 +3,7 @@
+  */
+ 
+ #include "ticks.h"
++#include "viz.h"
+ #include "backend.h"
+ #include "debugger.h"
+ #include <stdio.h>
+@@ -72,6 +73,8 @@
+ uint8_t get_memory(uint32_t pc, memtype type)
+ {
+   bk.debugger_read_memory(pc);
++  if (viz)
++    viz->act[pc & 0xffff] |= (type == MEM_TYPE_INST) ? VIZ_PROG : VIZ_READ;
+   return  *get_memory_addr(pc,type);
+ }
+ 
+@@ -79,6 +82,8 @@
+ uint8_t put_memory(uint16_t pc, uint8_t b)
+ {
+   bk.debugger_write_memory(pc, b);
++  if (viz)
++    viz->act[pc] |= VIZ_WRITE;
+   if (pc < c_rom_size)
+     return *get_memory_addr(pc, MEM_TYPE_DATA);
+   else
+@@ -172,7 +177,7 @@
+ // Standard, 64k flat address space
+ static void standard_init(void) 
+ {
+-    mem = calloc(65536, 1);
++    mem = viz ? viz->ram : calloc(65536, 1);    // -shm: the host sees memory live
+     get_mem_addr = standard_get_memory_addr;
+ }
+ 
+diff -ruN a/src/ticks/ticks.c b/src/ticks/ticks.c
+--- a/src/ticks/ticks.c	2026-11-24 12:54:07
++++ b/src/ticks/ticks.c	2026-11-24 12:53:36
+@@ -4,6 +4,7 @@
+ #include <string.h>
+ 
+ #include "ticks.h"
++#include "viz.h"
+ #include "cpu.h"
+ #include "debugger.h"
+ #include "backend.h"
+@@ -960,6 +961,8 @@
+   uint8_t opc;
+ 
+   do{
++    if ( viz && ih && st >= viz_next )
++        viz_tick();
+     if ( ih ) {
+         if (break_required) {
+             break_required = 0;
+diff -ruN a/src/ticks/ticks_main.c b/src/ticks/ticks_main.c
+--- a/src/ticks/ticks_main.c	2026-11-24 12:54:07
++++ b/src/ticks/ticks_main.c	2026-11-24 12:53:36
+@@ -4,6 +4,7 @@
+ #include <string.h>
+ 
+ #include "ticks.h"
++#include "viz.h"
+ #include "cpu.h"
+ #include "debugger.h"
+ #include "backend.h"
+@@ -223,6 +224,9 @@
+ 			}
+ 			else if (strcmp(&argv[0][1], "script") == 0) {
+ 				script_file = argv[1];
++			}
++			else if (strcmp(&argv[0][1], "shm") == 0) {
++				viz_open(argv[1]);
+ 			}
+           break;
+         case 'e':
+diff -ruN a/src/ticks/viz.c b/src/ticks/viz.c
+--- a/src/ticks/viz.c	1970-01-01 01:00:00
++++ b/src/ticks/viz.c	2026-11-24 12:53:15
+@@ -0,0 +1,116 @@
++/* viz: see viz.h. */
++#include <fcntl.h>
++#include <stddef.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/mman.h>
++#include <time.h>
++#include <unistd.h>
++
++#include "ticks.h"
++#include "viz.h"
++
++_Static_assert(offsetof(struct viz, tstates) == 24, "viz layout");
++_Static_assert(offsetof(struct viz, regs) == 32, "viz layout");
++_Static_assert(offsetof(struct viz, ram) == 64, "viz layout");
++_Static_assert(offsetof(struct viz, act) == 64 + 65536, "viz layout");
++
++#define UNLIMITED_STEP 200000   /* T-states between publishes at full speed */
++#define TICKS_PER_SEC  100      /* checks per emulated second when throttled */
++#define PAUSE_POLL_US  10000
++
++extern int f(void);             /* ticks.c: F and F' from the lazy flag state */
++extern int f_(void);
++extern unsigned char r;
++
++struct viz *viz = NULL;
++long long   viz_next = 0;
++
++static uint32_t  base_hz;       /* speed the clock base below refers to */
++static long long base_st;       /* st and wall time when that speed started */
++static double    base_s;
++static int       rebase = 1;    /* set after a pause or a blocking read */
++
++static double now_s(void)
++{
++    struct timespec ts;
++    clock_gettime(CLOCK_MONOTONIC, &ts);
++    return ts.tv_sec + ts.tv_nsec * 1e-9;
++}
++
++void viz_open(const char *path)
++{
++    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0600);
++    if (fd < 0 || ftruncate(fd, sizeof(struct viz)) != 0) {
++        perror(path);
++        exit(EXIT_FAILURE);
++    }
++    viz = mmap(NULL, sizeof(struct viz), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
++    close(fd);
++    if (viz == MAP_FAILED) {
++        perror(path);
++        exit(EXIT_FAILURE);
++    }
++    viz->version = 1;
++    __sync_synchronize();
++    memcpy(viz->magic, "Z8VZ", 4);
++}
++
++static void publish(void)
++{
++    viz->seq++;                 /* odd: being written */
++    __sync_synchronize();
++    viz->tstates = st;
++    viz->regs[0]  = a  << 8 | f();
++    viz->regs[1]  = b  << 8 | c;
++    viz->regs[2]  = d  << 8 | e;
++    viz->regs[3]  = h  << 8 | l;
++    viz->regs[4]  = xh << 8 | xl;
++    viz->regs[5]  = yh << 8 | yl;
++    viz->regs[6]  = sp;
++    viz->regs[7]  = pc;
++    viz->regs[8]  = a_ << 8 | f_();
++    viz->regs[9]  = b_ << 8 | c_;
++    viz->regs[10] = d_ << 8 | e_;
++    viz->regs[11] = h_ << 8 | l_;
++    viz->i = i;
++    viz->r = (r & 0x7F) | (r7 & 0x80);
++    __sync_synchronize();
++    viz->seq++;                 /* even: consistent */
++}
++
++void viz_tick(void)
++{
++    uint32_t hz;
++
++    publish();
++    if (viz->paused) {
++        while (viz->paused)
++            usleep(PAUSE_POLL_US);
++        rebase = 1;
++    }
++    hz = viz->speed_hz;
++    if (hz == 0) {
++        rebase = 1;
++        viz_next = st + UNLIMITED_STEP;
++        return;
++    }
++    if (rebase || hz != base_hz) {
++        base_hz = hz;
++        base_st = st;
++        base_s = now_s();
++        rebase = 0;
++    } else {
++        double ahead = base_s + (double)(st - base_st) / hz - now_s();
++        if (ahead > 0)
++            usleep((useconds_t)(ahead * 1e6));
++    }
++    viz_next = st + (hz / TICKS_PER_SEC > 100 ? hz / TICKS_PER_SEC : 100);
++}
++
++void viz_idle(void)
++{
++    publish();
++    rebase = 1;                 /* waiting for input is not time to catch up on */
++}
+diff -ruN a/src/ticks/viz.h b/src/ticks/viz.h
+--- a/src/ticks/viz.h	1970-01-01 01:00:00
++++ b/src/ticks/viz.h	2026-11-24 12:53:03
+@@ -0,0 +1,53 @@
++/* viz: live view of the emulated Z80 for an outside program (mnist-on-Z80).
++ *
++ * "-shm <file>" creates <file> and maps it shared. The host maps the same file
++ * and reads it while the program runs:
++ *
++ *   offset  size   field
++ *        0     4   magic "Z8VZ" (written last, when the file is ready)
++ *        4     4   version (1)
++ *        8     4   seq: odd while ticks writes regs/tstates, +2 per publish
++ *       12     4   speed_hz   written by the host: 0 = as fast as possible
++ *       16     4   paused     written by the host: non-zero = stop between instructions
++ *       24     8   tstates
++ *       32    24   af bc de hl ix iy sp pc af' bc' de' hl' (uint16 each)
++ *       56     2   i, r
++ *       64 65536   ram: the emulated memory itself (standard memory model only)
++ *    65600 65536   act: per address, bit 0 read, 1 write, 2 prog (instruction fetch);
++ *                  ticks sets bits, the host clears them after drawing
++ *
++ * All fields are little-endian (the host's byte order). Without -shm, ticks
++ * behaves exactly as before.
++ */
++#ifndef VIZ_H
++#define VIZ_H
++
++#include <stdint.h>
++
++#define VIZ_READ  1
++#define VIZ_WRITE 2
++#define VIZ_PROG  4
++
++struct viz {
++    char     magic[4];
++    uint32_t version;
++    volatile uint32_t seq;
++    volatile uint32_t speed_hz;
++    volatile uint32_t paused;
++    uint32_t reserved;
++    uint64_t tstates;
++    uint16_t regs[12];
++    uint8_t  i, r;
++    uint8_t  pad[6];
++    uint8_t  ram[65536];
++    volatile uint8_t act[65536];
++};
++
++extern struct viz *viz;         /* NULL without -shm */
++extern long long   viz_next;    /* st at which cpu_run calls viz_tick() next */
++
++void viz_open(const char *path);
++void viz_tick(void);            /* publish, keep to speed_hz, wait while paused */
++void viz_idle(void);            /* publish before blocking on input */
++
++#endif

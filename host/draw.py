@@ -7,11 +7,15 @@ mass at (14, 14) in a 28x28 frame, binarize with the training threshold.
 The result is the 784-value 0/1 vector the Z80 expects (pixel i = 28*row + col).
 
 DrawingApp is independent of the Z80: host/demo.py passes a callback that
-sends the image to the board and returns the digit.
+sends the image to the board and returns the digit. The callback runs in a
+background thread (Worker), so the window keeps redrawing while the Z80 works;
+an optional side panel (host/debug_panel.py) uses the same thread.
 
 Run `python host/draw.py` to check the preprocessing by eye in the terminal.
 """
 
+import queue
+import threading
 import tkinter as tk
 
 import numpy as np
@@ -25,6 +29,7 @@ FRAME_SIZE = 28            # MNIST frame
 FRAME_CENTER = 14          # target (row, col) of the center of mass
 BINARY_THRESHOLD = 127     # ToTensor() then x > 0.5  <=>  byte >= 128
 PREVIEW_SCALE = 8          # 28 * 8 = 224 px preview
+POLL_MS = 20               # how often Tk checks for finished background jobs
 
 
 def preprocess(img):
@@ -77,22 +82,73 @@ def preview_image(x):
     return ImageTk.PhotoImage(img.resize((side, side), Image.NEAREST))
 
 
+class Worker:
+    """Runs jobs one at a time in a background thread.
+
+    submit(fn, done): fn() runs in the thread; done(result, error) is then
+    called in Tk's thread, where widgets may be touched. One thread means the
+    Z80 sees one command at a time, whoever sends it.
+    """
+
+    def __init__(self, root):
+        self.root = root
+        self.jobs = queue.Queue()
+        self.results = queue.Queue()
+        self.pending = 0
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def submit(self, fn, done):
+        self.pending += 1
+        self.jobs.put((fn, done))
+        if self.pending == 1:
+            self.root.after(POLL_MS, self._poll)
+
+    def _run(self):
+        while True:
+            fn, done = self.jobs.get()
+            try:
+                self.results.put((done, fn(), None))
+            except Exception as error:      # shown by done(), the thread keeps going
+                self.results.put((done, None, error))
+
+    def _poll(self):
+        while not self.results.empty():
+            done, result, error = self.results.get()
+            self.pending -= 1
+            done(result, error)
+        if self.pending:
+            self.root.after(POLL_MS, self._poll)
+
+
 class DrawingApp(tk.Tk):
     """Window with a drawing canvas, a preview of the network input and the result.
 
     on_submit(x) -> str, if given, receives the preprocessed (784,) vector on
-    "Recognize" and its return value is shown in the result label.
+    "Recognize" and its return value is shown in the result label. It runs in
+    the worker thread.
+    side_panel(app) -> tk widget, if given, is placed on the right. It can run
+    its own jobs with app.run_in_background, and its refresh() is called after
+    each result.
     """
 
-    def __init__(self, on_submit=None):
+    def __init__(self, on_submit=None, side_panel=None):
         super().__init__()
         self.title("Draw a digit")
         self.on_submit = on_submit
+        self.busy = False
         self.last_point = None
         self.image = Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)
         self.pen = ImageDraw.Draw(self.image)
+        self.worker = Worker(self)
         self._build_widgets()
+        self.panel = None
+        if side_panel is not None:
+            self.panel = side_panel(self)
+            self.panel.grid(row=0, column=2, rowspan=4, sticky="n", padx=10, pady=10)
         self.clear()
+
+    def run_in_background(self, fn, done):
+        self.worker.submit(fn, done)
 
     def _build_widgets(self):
         """Create and lay out the widgets, bind mouse and keyboard."""
@@ -104,7 +160,8 @@ class DrawingApp(tk.Tk):
 
         buttons = tk.Frame(self)
         buttons.grid(row=1, column=0, columnspan=2)
-        tk.Button(buttons, text="Recognize", command=self.recognize).pack(side=tk.LEFT, padx=5)
+        self.recognize_button = tk.Button(buttons, text="Recognize", command=self.recognize)
+        self.recognize_button.pack(side=tk.LEFT, padx=5)
         tk.Button(buttons, text="Clear", command=self.clear).pack(side=tk.LEFT, padx=5)
 
         self.result = tk.Label(self, font=("Helvetica", 48, "bold"))
@@ -134,7 +191,9 @@ class DrawingApp(tk.Tk):
         self.last_point = None
 
     def recognize(self):
-        """Preprocess the drawing, show the preview and the callback's answer."""
+        """Preprocess the drawing, show the preview, ask the callback in the background."""
+        if self.busy:
+            return
         x = preprocess(self.image)
         if x is None:
             self.status.config(text="Draw a digit first")
@@ -142,7 +201,22 @@ class DrawingApp(tk.Tk):
         self._show_preview(x)
         self.status.config(text="")
         if self.on_submit is not None:
-            self.result.config(text=self.on_submit(x))
+            self.busy = True
+            self.recognize_button.config(state=tk.DISABLED)
+            self.status.config(text="The Z80 is working...")
+            self.run_in_background(lambda: self.on_submit(x), self._on_result)
+
+    def _on_result(self, text, error):
+        """Back in Tk's thread: show the answer, then let the panel refresh."""
+        self.busy = False
+        self.recognize_button.config(state=tk.NORMAL)
+        if error is not None:
+            self.status.config(text=f"Error: {error}")
+            return
+        self.status.config(text="")
+        self.result.config(text=text)
+        if self.panel is not None:
+            self.panel.refresh()
 
     def clear(self):
         """Erase the drawing, the preview and the result."""

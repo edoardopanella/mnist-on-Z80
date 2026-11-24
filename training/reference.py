@@ -1,4 +1,4 @@
-from train import WEIGHTS_PATH, DATA_DIR, get_data, MLP
+from train import WEIGHTS_PATH, get_data, MLP
 
 import torch
 import numpy as np

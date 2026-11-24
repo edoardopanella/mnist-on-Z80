@@ -28,37 +28,6 @@
             ],
             "execAddress": "0x0000",
             "startAutomatically": false,
-        },
-
-        {
-            // Draw a digit in the "Z80 Simulator" panel; firmware/z80_draw_main.c
-            "type": "dezog",
-            "request": "launch",
-            "name": "Z80 draw UI",
-            "remoteType": "zsim",
-            "zsim": {
-                "memoryModel": "RAM",
-                "cpuFrequency": 3500000,
-                "limitSpeed": false,      // run as fast as the host allows
-                "customCode": {
-                    "debug": true,        // adds a "reload" button for the JS/UI
-                    "jsPath": "host/dezog/draw_logic.js",
-                    "uiPath": "host/dezog/draw_ui.html"
-                }
-            },
-            "rootFolder": "${workspaceFolder}",
-            "z88dkv2": [
-                { "path": "firmware/z80_draw_main.c.lis", "srcDirs": [""], "mapFile": "build/draw.map" },
-                { "path": "firmware/nn.c.lis", "srcDirs": [""], "mapFile": "build/draw.map" }
-            ],
-            "topOfStack": "__register_sp",
-            "loadObjs": [
-                { "path": "build/draw_CODE.bin", "start": "0x0000" },
-                { "path": "build/draw_DATA.bin", "start": "0x8000" },
-                { "path": "build/weights_payload.bin", "start": "0x1000" }
-            ],
-            "execAddress": "0x0000",
-            "startAutomatically": true
         }
     ]
 }

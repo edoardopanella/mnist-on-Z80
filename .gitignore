@@ -27,6 +27,7 @@ test_host
 # OS / editor
 .DS_Store
 .idea/
+.vscode/settings.json
 
 # Environments
 .venv/

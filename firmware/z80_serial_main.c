@@ -1,11 +1,15 @@
 /* Line-protocol firmware (docs/spec.md §7.5), the Z80 side of host/z80nn.py.
  *
  * One command per line, one reply per command (D replies with four lines):
- *   V                  -> "Z80NN 1"
+ *   V                  -> "Z80NN 2"
  *   W oooo <hex>       -> "OK"      up to 64 bytes of the weights payload at offset oooo
  *   C                  -> "C xxxx"  16-bit sum of the whole payload
  *   I <196 hex>        -> "R d"     classify a packed image (98 bytes, MSB = first pixel)
  *   D <196 hex>        -> "A1 ...", "H ...", "A2 ...", "R d"
+ *   G                  -> "G af bc de hl ix iy sp pc af' bc' de' hl' i r"  registers
+ *                         snapped right after the last I/D inference (all 0 before), hex;
+ *                         stack_copy holds the 256 bytes from that SP (read it with M)
+ *   M aaaa nn          -> "M <2*nn hex>"  read nn bytes (01..40 hex) from address aaaa
  * Errors: ERR CMD, ERR HEX, ERR LEN, ERR OFS, ERR LONG. The program keeps running.
  *
  * Two builds, same protocol; only ser_init/ser_getc/ser_putc differ:
@@ -19,11 +23,13 @@
 #include <stdio.h>
 #include <string.h>
 #include "nn.h"
+#include "snapregs.h"
 
 #define PAYLOAD_SIZE 25581          /* weights.bin without its 5-byte header */
 #define MAX_CHUNK    64
 #define IMG_BYTES    (N_IN / 8)     /* 98 */
 #define LINE_MAX     (2 + 2 * IMG_BYTES)   /* longest valid line: "I " + 196 hex */
+#define STACK_COPY   256
 
 _Static_assert(sizeof(struct nn_weights) == PAYLOAD_SIZE, "nn_weights layout != weights.bin payload");
 
@@ -32,6 +38,8 @@ static struct nn_trace trace;
 static uint8_t x[N_IN];
 static uint8_t buf[MAX_CHUNK > IMG_BYTES ? MAX_CHUNK : IMG_BYTES];
 static char line[LINE_MAX + 1];
+/* The stack as it was at the snapshot: G and M reuse that area for their own frames. */
+static uint8_t stack_copy[STACK_COPY];
 
 /* --- Serial I/O ------------------------------------------------------------ */
 
@@ -81,12 +89,18 @@ static void put_str(const char *s)
         ser_putc(*s++);
 }
 
+static const char hex_digits[] = "0123456789ABCDEF";
+
+static void put_hex2(uint8_t v)
+{
+    ser_putc(hex_digits[v >> 4]);
+    ser_putc(hex_digits[v & 0x0F]);
+}
+
 static void put_hex4(uint16_t v)
 {
-    static const char digits[] = "0123456789ABCDEF";
-    int8_t sh;
-    for (sh = 12; sh >= 0; sh -= 4)
-        ser_putc(digits[(v >> sh) & 0x0F]);
+    put_hex2((uint8_t)(v >> 8));
+    put_hex2((uint8_t)v);
 }
 
 /* Decimal int32 without printf (smaller, and no %ld support to configure). */
@@ -230,6 +244,8 @@ static void cmd_infer(const char *arg, uint8_t len, uint8_t debug)
             *p++ = (buf[i] & bit) ? 1 : 0;
 
     digit = nn_infer(&weights, x, debug ? &trace : NULL);
+    snap_regs();                        /* for G: the registers right after inference */
+    memcpy(stack_copy, (const void *)regs.sp, STACK_COPY);
 
     if (debug) {
         int32_t h[N_HID];               /* h_q widened so put_list prints it too */
@@ -241,6 +257,50 @@ static void cmd_infer(const char *arg, uint8_t len, uint8_t debug)
     }
     put_str("R ");
     ser_putc((char)('0' + digit));
+    ser_putc('\n');
+}
+
+/* "G": the snapshot taken by the last I/D, 12 words then I and R. */
+static void cmd_regs(void)
+{
+    const uint16_t *w = (const uint16_t *)&regs;
+    uint8_t k;
+
+    ser_putc('G');
+    for (k = 0; k < 12; k++) {
+        ser_putc(' ');
+        put_hex4(w[k]);
+    }
+    ser_putc(' ');
+    put_hex2(regs.i);
+    ser_putc(' ');
+    put_hex2(regs.r);
+    ser_putc('\n');
+}
+
+/* "M aaaa nn": arg points at aaaa. Any address is allowed; it wraps at 0xFFFF. */
+static void cmd_memory(const char *arg, uint8_t len)
+{
+    uint16_t addr;
+    uint8_t n;
+
+    if (len != 7 || arg[4] != ' ') {
+        reply("ERR LEN");
+        return;
+    }
+    if (hex_bytes(arg, buf, 2) != 0 || hex_bytes(arg + 5, buf + 2, 1) != 0) {
+        reply("ERR HEX");
+        return;
+    }
+    addr = (uint16_t)buf[0] << 8 | buf[1];
+    n = buf[2];
+    if (n == 0 || n > MAX_CHUNK) {
+        reply("ERR LEN");
+        return;
+    }
+    put_str("M ");
+    while (n--)
+        put_hex2(*(const uint8_t *)addr++);
     ser_putc('\n');
 }
 
@@ -259,9 +319,13 @@ int main(void)
         }
 
         if (len == 1 && line[0] == 'V')
-            reply("Z80NN 1");
+            reply("Z80NN 2");
         else if (len == 1 && line[0] == 'C')
             cmd_checksum();
+        else if (len == 1 && line[0] == 'G')
+            cmd_regs();
+        else if (len > 2 && line[1] == ' ' && line[0] == 'M')
+            cmd_memory(line + 2, (uint8_t)(len - 2));
         else if (len > 2 && line[1] == ' ' && line[0] == 'W')
             cmd_write(line + 2, (uint8_t)(len - 2));
         else if (len > 2 && line[1] == ' ' && (line[0] == 'I' || line[0] == 'D'))

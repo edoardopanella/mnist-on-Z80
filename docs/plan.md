@@ -1,5 +1,7 @@
 # MNIST on Z80 — Implementation Plan
 
+> **Historical.** This is the plan as written on 2026-11-02, before the firmware, the host tools and the tests existed; it is kept as a record and not updated. The current state is in `README.md`, and the contract in `docs/spec.md`. File names here may differ from the final ones (for example `z80_main.c` became `firmware/z80_serial_main.c`, and `tests/test_e2e.py` became `tests/test_emu.py`; the laptop runner `tests/host_main.c` was never written, the emulator tests took its place).
+
 Status as of 2026-11-02. Companion to `docs/spec.md`, which remains the normative contract.
 
 ## 1. Status of the blocks
