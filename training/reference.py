@@ -1,3 +1,9 @@
+"""
+reference.py - Integer inference in numpy, computed exactly as the Z80 does it.
+
+Run it to compare the integer model with the float one on the MNIST test set.
+"""
+
 from train import WEIGHTS_PATH, get_data, MLP
 
 import torch
@@ -6,11 +12,12 @@ import os
 
 QUANT_PATH = os.path.join(os.path.dirname(WEIGHTS_PATH), "quantized.npz")
 
-ARRAYS = ["W1q", "b1q", "W2q", "b2q"]                          
-SCALARS = ["M0", "shift", "bound", "s1", "s2", "s_h", "h_max"] 
+ARRAYS = ["W1q", "b1q", "W2q", "b2q"]
+SCALARS = ["M0", "shift", "bound", "s1", "s2", "s_h", "h_max"]
 
 
 def load_quantized(path):
+    """quantized.npz as a dict: arrays as int64, scalars as Python numbers."""
     q = {}
     with np.load(path) as f:
         for name in ARRAYS:
@@ -20,8 +27,8 @@ def load_quantized(path):
     return q
 
 
-
 def load_test_images():
+    """The 10,000 binarized test images as (10000, 784) int64, and their labels."""
     test_loader = get_data()["test_loader"]
 
     images, labels = [], []
@@ -30,8 +37,8 @@ def load_test_images():
         images.append(batch.reshape(batch.shape[0], 784).numpy().astype(np.int64))
         labels.append(target.numpy())
 
-    images = np.concatenate(images)   # shape (10000, 784)
-    labels = np.concatenate(labels)   # shape (10000,)
+    images = np.concatenate(images)
+    labels = np.concatenate(labels)
 
     assert images.shape == (10000, 784)
     assert set(np.unique(images)) <= {0, 1}, "images are not binarized"
@@ -39,9 +46,9 @@ def load_test_images():
 
 
 def infer_int(x, q):
+    """Returns (digit, acc1, h_q, acc2). acc1 is before the ReLU."""
     assert x.shape == (784,), f"expected shape (784,), got {x.shape}"
     assert np.all((x == 0) | (x == 1)), "image contains values other than 0 and 1"
-
 
     acc1 = (q['W1q'] @ x) +q['b1q']
     acc1_relu = np.maximum(acc1, 0)
@@ -65,20 +72,18 @@ def load_float_model():
 
 @torch.no_grad()
 def evaluate(images, labels, q):
+    """Accuracy of both models, how often they agree, and how often h_q saturates."""
     N = images.shape[0]
 
-    # Step 1: float model predictions
     model = load_float_model()
-    float_logits = model(torch.from_numpy(images).float())   # shape (N, 10)
-    pred_float = float_logits.argmax(dim=1).numpy()          # shape (N,)
+    float_logits = model(torch.from_numpy(images).float())   # (N, 10)
+    pred_float = float_logits.argmax(dim=1).numpy()          # (N,)
 
-    # Step 2: counters
     correct_int = 0
     agreed = 0
     count_127 = 0
     max_acc1 = float('-inf')
 
-    # Step 3: integer reference, one image at a time
     for i in range(N):
         digit, acc1, h_q, acc2 = infer_int(images[i], q)
         if digit == labels[i]:
@@ -88,7 +93,6 @@ def evaluate(images, labels, q):
         count_127 += np.count_nonzero(h_q == 127)
         max_acc1 = max(max_acc1, int(np.max(acc1)))
 
-    # Step 4: results
     return {
         "acc_float": float(np.mean(pred_float == labels)),
         "acc_int": correct_int / N,

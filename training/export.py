@@ -1,8 +1,7 @@
 """
-export.py - Export the quantized weights and the test vectors as binary files for the C code.
+export.py - Write the quantized weights and the test vectors as binary files for the C code.
 
-All multi-byte numbers are little-endian (least significant byte first), as on the Z80.
-Keep this format identical to the one described in docs/spec.md.
+Multi-byte numbers are little-endian, as on the Z80. The format must match docs/spec.md.
 
 weights.bin  (5 + 25,581 = 25,586 bytes)
     4         bytes  magic "Z8NN"
@@ -57,8 +56,8 @@ RECORD_SIZE = N_IN + N_HID * 4 + N_HID + N_OUT * 4 + 1   # 985
 
 
 # --- Range-checked conversions ----------------------------------------------
-# astype() does NOT raise errors: an out-of-range value silently "wraps around"
-# and becomes a wrong number. That is why the range is checked BEFORE converting.
+# astype() does not raise on out-of-range values, it silently wraps them.
+# So the range is checked before converting.
 
 def _check_range(name, arr, lo, hi):
     arr = np.asarray(arr)
@@ -102,7 +101,7 @@ def write_weights(q, path):
 
 
 def read_weights(path):
-    """Read weights.bin back the way the C code would. Used only for checks."""
+    """Read weights.bin back, as the C code sees it. Only used for checks."""
     with open(path, "rb") as f:
         data = f.read()
 
@@ -134,7 +133,7 @@ def read_weights(path):
 # --- Test cases -------------------------------------------------------------
 
 def build_test_images(images, q):
-    """Return a list of (name, image) pairs."""
+    """N_REAL test images plus a few edge cases, as (name, image) pairs."""
     cases = [(f"mnist_{i}", images[i]) for i in range(N_REAL)]
 
     zeros = np.zeros(N_IN, dtype=np.int64)
@@ -143,8 +142,8 @@ def build_test_images(images, q):
     last_pixel = zeros.copy()
     last_pixel[-1] = 1
 
-    # "Worst" image: turns on exactly the pixels with a positive weight for the
-    # neuron with the largest possible acc1. It drives that neuron to bound.
+    # "Worst" image: lights the pixels with a positive weight for the neuron
+    # with the largest possible acc1, so that neuron reaches bound.
     max_acc_per_neuron = np.maximum(q["W1q"], 0).sum(axis=1) + q["b1q"]
     worst_neuron = int(np.argmax(max_acc_per_neuron))
     worst = (q["W1q"][worst_neuron] > 0).astype(np.int64)
@@ -157,7 +156,7 @@ def build_test_images(images, q):
         (f"worst_neuron_{worst_neuron}", worst),
     ]
 
-    # The worst image must actually reach bound
+    # Check that it really does
     _, acc1, _, _ = infer_int(worst, q)
     assert acc1[worst_neuron] == q["bound"], (acc1[worst_neuron], q["bound"])
 
@@ -183,7 +182,7 @@ def write_test_vectors(cases, q, path):
 
 
 def read_test_vectors(path):
-    """Read testvec.bin back the way the C code would. Used only for checks."""
+    """Read testvec.bin back as a list of dicts. Also used by the tests."""
     with open(path, "rb") as f:
         data = f.read()
 

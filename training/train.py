@@ -2,8 +2,8 @@
 train.py - Train a 784 -> 32 -> 10 MLP on binarized MNIST.
 
 Output: artifacts/mlp.pt (float weights, state_dict).
-Also defines MLP, get_data() and the paths used by the other scripts.
-Importing this file has no side effects: everything runs inside main().
+Also defines MLP, get_data() and the paths the other scripts use.
+Importing it has no side effects.
 """
 
 import os
@@ -35,7 +35,7 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 class MLP(nn.Module):
     def __init__(self):
         super().__init__()
-        # The linear layers are layers[1] and layers[3] (used by quantize.py)
+        # quantize.py reads the linear layers as layers[1] and layers[3]
         self.layers = nn.Sequential(
             nn.Flatten(),
             nn.Linear(784, 32),
@@ -57,7 +57,7 @@ def build_model():
 # --- Data -----------------------------------------------------------------------
 
 def get_data(data_dir=DATA_DIR):
-    """Binarized MNIST: every pixel is 0 or 1, exactly as the Z80 receives it."""
+    """Binarized MNIST: every pixel is 0 or 1, as the Z80 receives it."""
     os.makedirs(data_dir, exist_ok=True)
     transform = Compose([ToTensor(), Lambda(lambda x: (x > 0.5).float())])
 
@@ -109,7 +109,7 @@ def train_one_epoch(data_loader, model, criterion, optimizer):
 
 @torch.no_grad()
 def evaluate(data_loader, model, criterion):
-    """One pass over the given loader, no weight updates."""
+    """Loss and accuracy on data_loader, without training."""
     model.eval()
     total_loss = 0
     total_correct = 0

@@ -15,7 +15,7 @@ struct nn_weights {                 /* same fields and order as weights.bin */
     int32_t b2q[N_OUT];
 };
 
-struct nn_trace {                   /* intermediate values, for tests */
+struct nn_trace {                   /* intermediate values, for tests and the D command */
     int32_t acc1[N_HID];            /* before ReLU */
     uint8_t h_q[N_HID];
     int32_t acc2[N_OUT];

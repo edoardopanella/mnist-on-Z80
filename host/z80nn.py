@@ -1,7 +1,9 @@
-'''
-Host-side client for the Z80 inference firmware: sends weights, images and
-debug commands over the line protocol to a native build, the emulator or the board.
-'''
+"""
+z80nn.py - Host side of the line protocol (firmware/z80_serial_main.c).
+
+Z80NN sends weights, images and debug commands to a native build, the
+emulator or the board, and parses the replies.
+"""
 
 
 import os
@@ -11,27 +13,30 @@ import tty
 
 import numpy as np
 
-# Order of the G reply = struct regs in firmware/snapregs.h
+# Order of the G reply, same as struct regs in firmware/snapregs.h
 REG_NAMES = ["af", "bc", "de", "hl", "ix", "iy", "sp", "pc", "af2", "bc2", "de2", "hl2", "i", "r"]
 MAX_CHUNK = 64      # bytes per W or M line
 
 class Z80NN:
     def __init__(self, target, where, ticks="z88dk-ticks", shm=None):
-        # target: "local" (native build on the host), "emu" (emulator), "board" (the board)
-        # emu only: ticks = the emulator to run; shm = file for the live view, which
-        # needs the patched ticks (make ticks-viz, see host/z80debug.py LiveSource)
+        """target is "local" (native build), "emu" (z88dk-ticks) or "board" (serial port).
+
+        where is the program to run, or the serial port for the board.
+        emu only: ticks is the emulator binary. shm is the file for the live view,
+        which needs the patched ticks (make ticks-viz).
+        """
         self.target = target
 
         if target == "local":
             self.proc = subprocess.Popen([where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
         elif target == "emu":
-            # where = build/emu.bin (make emu) or build/board.rom (make rom, ACIA emulated by ticks).
-            # -counter: ticks quits after 1e8 T-states by default, about 10 inferences
-            # stdout is a pseudo-terminal, not a pipe: ticks' emulated ACIA never flushes,
-            # and only on a terminal does the C library flush at every '\n'.
+            # where is build/emu.bin or build/board.rom (ticks emulates the ACIA).
+            # -counter: by default ticks quits after 1e8 T-states, about 10 inferences.
+            # stdout is a pty, not a pipe: ticks' ACIA output is only flushed
+            # at each '\n' when it goes to a terminal.
             master, slave = pty.openpty()
-            tty.setraw(slave)       # no '\n' -> '\r\n' translation, no echo
+            tty.setraw(slave)       # no '\n' -> '\r\n', no echo
             live = ["-shm", shm] if shm else []
             self.proc = subprocess.Popen([ticks, "-counter", "100000000000", *live, where],
                                          stdin=subprocess.PIPE, stdout=slave, text=True)
@@ -42,11 +47,9 @@ class Z80NN:
             import serial
             self.port = serial.Serial(where, 115200,rtscts=True, timeout=5)
 
-
         else:
             raise ValueError("target must be 'local', 'emu' or 'board'")
 
-    # Helper functions: write and read line
     def _write_line(self, text):
         if self.target == "board":
             self.port.write((text + "\n").encode("ascii"))
@@ -60,7 +63,7 @@ class Z80NN:
         elif self.target == "emu":
             try:
                 line = self.out.readline()
-            except OSError:         # the pty reports EIO once ticks has exited
+            except OSError:         # the pty raises EIO once ticks has exited
                 line = ""
         else:
             line = self.proc.stdout.readline()
@@ -69,9 +72,8 @@ class Z80NN:
 
         return line.strip()
 
-
-    # Send a command
     def send(self, text):
+        """Send one command and return its one-line reply. Raises on ERR."""
         self._write_line(text)
         answer = self._read_line()
 
@@ -82,9 +84,8 @@ class Z80NN:
     def version(self):
         return self.send("V")
 
-    # Sending the weights as chunks of 64 bytes each
-
     def load_weights(self, path):
+        """Upload weights.bin in 64-byte W commands, then verify the checksum."""
         with open(path, "rb") as f:
             data = f.read()
         if data[:4] != b"Z8NN" or data[4] != 1:
@@ -92,25 +93,24 @@ class Z80NN:
 
         payload = data[5:] # skip the 5-byte header
 
-        for offset in range(0, len(payload), 64): # 0, 64, 128, ...
-            chunk = payload[offset: offset + 64] 
+        for offset in range(0, len(payload), 64):
+            chunk = payload[offset: offset + 64]
             self.send(f"W {offset:04X} {chunk.hex().upper()}")
 
-
-        # checksum
+        # The Z80 replies "C xxxx", the 16-bit sum of the bytes it received
         expected = sum(payload) % 65536
-        answer = self.send("C") # e.g. "C 3A7F": 16-bit sum of the weight bytes received
+        answer = self.send("C")
         got = int(answer.split()[1], 16)
 
         if got != expected:
             raise RuntimeError(f"checksum mismatch: expected {expected:04X}, got {got:04X}")
-
 
     def classify(self, x):
         answer = self.send("I " + pack_image(x))
         return int(answer.split()[1])
 
     def classify_debug(self, x):
+        """Like classify, but also returns the intermediate values: (digit, acc1, h_q, acc2)."""
         self._write_line("D " + pack_image(x))
         acc1 = self._read_numbers("A1", 32)
         h_q = self._read_numbers("H", 32)
@@ -118,10 +118,8 @@ class Z80NN:
         digit = self._read_numbers("R", 1)[0]
         return digit, acc1, h_q, acc2
 
-    # Debug: register snapshot and memory reads (G and M commands)
-
     def registers(self):
-        """Registers snapped right after the last I/D, as {name: int} (REG_NAMES)."""
+        """Registers saved right after the last I/D, as {name: int} (REG_NAMES)."""
         parts = self.send("G").split()
         if parts[0] != "G" or len(parts) != len(REG_NAMES) + 1:
             raise RuntimeError(f"unexpected answer: {' '.join(parts)!r}")
@@ -140,39 +138,29 @@ class Z80NN:
         return bytes(data)
 
     def _read_numbers(self, label, count):
-        # reads a line like "A1 323 420 -193 ..." and returns the numbers
+        """Parse a reply line like "A1 323 420 -193 ..." into its numbers."""
         line = self._read_line()
         parts = line.split()
         if parts[0] != label or len(parts) != count + 1:
             raise RuntimeError(f"unexpected answer: {line!r}")
         return [int(p) for p in parts[1:]]
 
-
     def close(self):
         if self.target == "board":
             self.port.close()
 
         else:
-            self.proc.stdin.close()     # emu.bin exits at end of input...
+            self.proc.stdin.close()     # emu.bin exits at end of input,
             try:
                 self.proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.proc.kill()        # ...board.rom polls the ACIA forever, like the board
+                self.proc.kill()        # board.rom polls the ACIA forever, like the board
                 self.proc.wait()
             if self.target == "emu":
                 self.out.close()
-   
 
-# 784 binary pixels -> 98 bytes (MSB first) -> uppercase hex
 
 def pack_image(x):
+    """784 pixels of 0/1 -> 98 bytes (first pixel in the MSB) -> uppercase hex."""
     bits = np.asarray(x, dtype=np.uint8).reshape(784)
     return np.packbits(bits).tobytes().hex().upper()
-
-
-
-
-    
-
-
-

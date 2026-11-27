@@ -1,3 +1,9 @@
+"""
+quantize.py - Turn the float weights in artifacts/mlp.pt into integers for the Z80.
+
+Output: artifacts/quantized.npz (int8 weights, int32 biases, M0 and shift).
+"""
+
 import torch
 import numpy as np
 import os
@@ -7,6 +13,7 @@ QUANT_PATH = os.path.join(os.path.dirname(WEIGHTS_PATH), "quantized.npz")
 
 
 def quantize_symmetric(w):
+    """int8 weights in [-127, 127] and the scale s, with w ~= wq * s."""
     s = (torch.max(torch.abs(w)) / 127).item()
     wq = torch.round(w / s).clamp(-127, 127).to(torch.int8)
 
@@ -14,6 +21,7 @@ def quantize_symmetric(w):
 
 
 def choose_m0_shift(M, bound):
+    """Largest shift (most precision) with M ~= M0 / 2^shift and no int32 overflow at acc1 = bound."""
     M0_best, shift_best = None, None
 
     for shift in range(1, 31):
@@ -43,15 +51,11 @@ def main():
     W2 = fc2.weight.detach()
     b2 = fc2.bias.detach()
 
-
-    #print(f"W1: {W1.shape}\nb1: {b1.shape}\n\nW2: {W2.shape}\nb2: {b2.shape}")
-
-    # Quantize layer 1
+    # Layer 1
     W1q, s1 = quantize_symmetric(W1)
     b1q = torch.round(b1 / s1).to(torch.int32)
 
-    # Quantize the neurons after layer 1
-
+    # Hidden values: the scale comes from the largest one over the training set
     data = get_data()
     train_loader = data['train_loader']
 
@@ -67,14 +71,14 @@ def main():
 
     s_h = h_max / 127
 
-    # Quantize layer 2
+    # Layer 2
     W2q, s2 = quantize_symmetric(W2)
     b2q = torch.round(b2 / (s_h * s2)).to(torch.int32)
 
-
+    # acc1 * M rescales layer 1's sums to h_q
     M = s1 / s_h
 
-
+    # Largest possible acc1: every pixel with a positive weight lit
     W1q_pos = W1q.to(torch.int64).clamp(min=0)
     b1q_i64 = b1q.to(torch.int64)
 
@@ -84,8 +88,7 @@ def main():
 
     M0, shift = choose_m0_shift(M=M, bound=bound)
 
-    # Checks and assertions and types
-    assert bound * M0 + 2**(shift - 1) < 2**31, "Overflow possibile in acc1 * M0"
+    assert bound * M0 + 2**(shift - 1) < 2**31, "acc1 * M0 can overflow"
     assert W1q.dtype == torch.int8 and W2q.dtype == torch.int8
     assert b1q.dtype == torch.int32 and b2q.dtype == torch.int32
 
@@ -93,16 +96,15 @@ def main():
     print(f"M: {M:.6g}  M0: {M0}  shift: {shift}  bound: {bound}")
     print(f"Relative error for M: {abs(M0 / 2**shift - M) / M:.2e}")
 
-    # Saving
     np.savez(
         QUANT_PATH,
-        W1q=W1q.numpy(), b1q=b1q.numpy(),        # weights and biases of layer 1
-        W2q=W2q.numpy(), b2q=b2q.numpy(),        # weights and biases of layer 2
+        W1q=W1q.numpy(), b1q=b1q.numpy(),        # layer 1
+        W2q=W2q.numpy(), b2q=b2q.numpy(),        # layer 2
         M0=M0, shift=shift,                      # requantization
         s1=s1, s2=s2, s_h=s_h, h_max=h_max, bound=bound,   # diagnostics
     )
 
-    # Final check
+    # Read it back
     saved = np.load(QUANT_PATH)
     assert np.array_equal(saved["W1q"], W1q.numpy())
     assert np.array_equal(saved["W2q"], W2q.numpy())

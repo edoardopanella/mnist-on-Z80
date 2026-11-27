@@ -1,22 +1,15 @@
 """
 draw.py - Draw a digit with the mouse and turn it into the network's input.
 
-preprocess() reproduces MNIST's preprocessing (docs/spec.md, sections 2 and 9):
-crop to the bounding box, scale the longest side to 20 px, put the center of
-mass at (14, 14) in a 28x28 frame, binarize with the training threshold.
-The result is the 784-value 0/1 vector the Z80 expects (pixel i = 28*row + col).
+preprocess() does what MNIST did (docs/spec.md, sections 2 and 9): crop to the
+bounding box, scale the longest side to 20 px, center the mass at (14, 14) in
+a 28x28 frame, binarize. The result is the 784-value 0/1 vector the Z80 expects.
 
-DrawingApp is independent of the Z80: host/demo.py passes a callback that
-sends the image to the board and returns the digit. The callback runs in a
-background thread (Worker), so the window keeps redrawing while the Z80 works;
-an optional side panel (host/debug_panel.py) uses the same thread, and an
-optional widget under the buttons (host/network_view.py) follows each digit.
-With either of them, the part under the mouse is put in focus and the others
-fade (host/focus.py); a "Focus on hover" checkbox turns it off.
-With on_stop, a slow classification can be stopped: its answer is dropped,
-and a digit asked for meanwhile runs next.
+DrawingApp knows nothing about the Z80. demo.py passes it a callback that
+classifies the image, and the callback runs in a background thread (Worker)
+so the window stays responsive.
 
-Run `python host/draw.py` to check the preprocessing by eye in the terminal.
+Run `python host/draw.py` to print the preprocessed image in the terminal.
 """
 
 import queue
@@ -34,17 +27,16 @@ INK_THRESHOLD = 30         # pixels above this count for the bounding box
 BOX_SIZE = 20              # longest side of the digit after scaling (MNIST)
 FRAME_SIZE = 28            # MNIST frame
 FRAME_CENTER = 14          # target (row, col) of the center of mass
-BINARY_THRESHOLD = 127     # ToTensor() then x > 0.5  <=>  byte >= 128
+BINARY_THRESHOLD = 127     # same as training: x > 0.5 after ToTensor() is byte >= 128
 PREVIEW_SCALE = 9          # 28 * 9 = 252 px preview
 POLL_MS = 20               # how often Tk checks for finished background jobs
-FONT_BOOST = 1             # pt added to Tk's named fonts: the whole UI reads larger
+FONT_BOOST = 1             # pt added to all of Tk's named fonts
 
 
 def preprocess(img):
-    """Turn a 280x280 "L" drawing (white on black) into the network input.
+    """Turn a white-on-black "L" drawing into a (784,) uint8 array of 0/1, row by row.
 
-    Returns a (784,) uint8 array of 0/1 values, row by row, or None if
-    nothing was drawn.
+    Returns None if nothing was drawn.
     """
     pixels = np.asarray(img)
     rows, cols = np.nonzero(pixels > INK_THRESHOLD)
@@ -58,7 +50,7 @@ def preprocess(img):
 
     center = center_of_mass(np.asarray(small, dtype=np.float64))
     if center is None:
-        return None  # faint specks that vanished when scaled down
+        return None  # only faint specks, gone after scaling
     row, col = center
 
     frame = Image.new("L", (FRAME_SIZE, FRAME_SIZE), 0)
@@ -84,7 +76,7 @@ def to_ascii(x):
 
 
 def preview_image(x):
-    """A (784,) 0/1 vector as a 224x224 PhotoImage, scaled up with NEAREST."""
+    """A (784,) 0/1 vector as a PhotoImage, scaled up by PREVIEW_SCALE."""
     img = Image.fromarray(np.asarray(x, dtype=np.uint8).reshape(FRAME_SIZE, FRAME_SIZE) * 255)
     side = FRAME_SIZE * PREVIEW_SCALE
     return ImageTk.PhotoImage(img.resize((side, side), Image.NEAREST))
@@ -93,9 +85,8 @@ def preview_image(x):
 class Worker:
     """Runs jobs one at a time in a background thread.
 
-    submit(fn, done): fn() runs in the thread; done(result, error) is then
-    called in Tk's thread, where widgets may be touched. One thread means the
-    Z80 sees one command at a time, whoever sends it.
+    submit(fn, done) runs fn() in the thread, then calls done(result, error)
+    in Tk's thread. Having a single thread means the Z80 gets one command at a time.
     """
 
     def __init__(self, root):
@@ -116,7 +107,7 @@ class Worker:
             fn, done = self.jobs.get()
             try:
                 self.results.put((done, fn(), None))
-            except Exception as error:      # shown by done(), the thread keeps going
+            except Exception as error:      # passed to done(), the thread keeps running
                 self.results.put((done, None, error))
 
     def _poll(self):
@@ -129,7 +120,7 @@ class Worker:
 
 
 def _enlarge_fonts(points):
-    """Add points to Tk's named fonts; the panels copy theirs from these."""
+    """Add points to Tk's named fonts. The panels derive their fonts from these."""
     for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont", "TkHeadingFont"):
         f = tkfont.nametofont(name)
         f.config(size=f.actual("size") + points)
@@ -138,22 +129,18 @@ def _enlarge_fonts(points):
 class DrawingApp(tk.Tk):
     """Window with a drawing canvas, a preview of the network input and the result.
 
-    on_submit(x) -> str, if given, receives the preprocessed (784,) vector on
-    "Recognize" and its return value is shown in the result label. It runs in
-    the worker thread.
-    side_panel(app) -> tk widget, if given, is placed on the right. It can run
-    its own jobs with app.run_in_background, and its refresh() is called after
-    each result.
-    below(app) -> tk widget, if given, is placed under the buttons instead of
-    the large result label: it shows the answer itself. It gets start(x) when
-    a digit goes to the Z80, refresh() after the answer, and clear() on Clear
-    and after Stop.
-    With side_panel or below, their focus_parts() and the drawing and preview
-    go to focus.HoverFocus, with a "Focus on hover" checkbox next to Clear.
-    on_stop(), if given, adds Stop: it is called in Tk's thread and must make
-    the running on_submit return soon. Its answer is dropped, then
-    on_stopped() is called, before any other job starts. Recognize while the
-    Z80 works stops it and runs the new drawing next; Clear stops it too.
+    All arguments are optional.
+    on_submit(x) -> str     called in the worker thread on Recognize, with the
+                            preprocessed image. Its return value is shown.
+    side_panel(app)         a widget placed on the right. Its refresh() is
+                            called after each result.
+    below(app)              a widget placed under the buttons, replacing the
+                            result label. It gets start(x), refresh() and clear().
+    on_stop()               adds a Stop button. Called in Tk's thread, it must
+                            make on_submit return soon. The answer is dropped
+                            and on_stopped() is called.
+    With side_panel or below, hovering focuses a part (focus.HoverFocus).
+    Recognize or Clear while the Z80 is busy also stops it.
     """
 
     def __init__(self, on_submit=None, side_panel=None, on_stop=None, on_stopped=None, below=None):
@@ -165,17 +152,17 @@ class DrawingApp(tk.Tk):
         self.on_stopped = on_stopped
         self.busy = False
         self.stopping = False
-        self.next_x = None              # drawing to run once the stopped one returns
+        self.next_x = None              # image to run once the stopped one returns
         self.last_point = None
         self.image = Image.new("L", (CANVAS_SIZE, CANVAS_SIZE), 0)
         self.pen = ImageDraw.Draw(self.image)
         self.worker = Worker(self)
         self._build_widgets()
         self.below = None
-        if below is not None:       # before the side panel, which may report to it
+        if below is not None:       # created before the side panel, which may report to it
             self.below = below(self)
             self.below.grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
-            self.result.grid_remove()   # below shows the answer (result still gets the text)
+            self.result.grid_remove()   # hidden, below shows the answer instead
         self.panel = None
         if side_panel is not None:
             self.panel = side_panel(self)
@@ -198,7 +185,7 @@ class DrawingApp(tk.Tk):
         self.worker.submit(fn, done)
 
     def _build_widgets(self):
-        """Create and lay out the widgets, bind mouse and keyboard."""
+        """Create and lay out the widgets, and bind mouse and keyboard."""
         side = FRAME_SIZE * PREVIEW_SCALE
         self.parts = []                 # drawing and preview, each with its caption
         for col, text, width in ((0, "Your drawing", CANVAS_SIZE),
@@ -252,9 +239,9 @@ class DrawingApp(tk.Tk):
         self.last_point = None
 
     def recognize(self):
-        """Preprocess the drawing, show the preview, ask the callback in the background.
+        """Preprocess the drawing, show the preview and send it to the callback.
 
-        While the Z80 works: stop it and run this drawing next (if it can stop).
+        If the Z80 is busy and can be stopped, stop it and run this drawing next.
         """
         if self.busy and self.on_stop is None:
             return
@@ -284,7 +271,7 @@ class DrawingApp(tk.Tk):
         self.run_in_background(lambda: self.on_submit(x), self._on_result)
 
     def stop(self):
-        """Ask the running classification to end; _on_result drops its answer."""
+        """Ask the running classification to end. _on_result drops its answer."""
         if not self.busy or self.stopping or self.on_stop is None:
             return
         self.stopping = True
@@ -293,7 +280,7 @@ class DrawingApp(tk.Tk):
         self.on_stop()
 
     def _on_result(self, text, error):
-        """Back in Tk's thread: show the answer, then let the panel refresh."""
+        """In Tk's thread: show the answer and refresh the panels."""
         self.busy = False
         self.recognize_button.config(state=tk.NORMAL)
         if self.stop_button is not None:
@@ -326,7 +313,7 @@ class DrawingApp(tk.Tk):
             self.panel.refresh()
 
     def clear(self):
-        """Erase the drawing, the preview and the result; stop the Z80 if it works."""
+        """Erase the drawing, preview and result, and stop the Z80 if it is busy."""
         self.canvas.delete("all")
         self.pen.rectangle([0, 0, CANVAS_SIZE, CANVAS_SIZE], fill=0)
         self.last_point = None
@@ -339,13 +326,13 @@ class DrawingApp(tk.Tk):
         self.stop()
 
     def _show_preview(self, x):
-        """Show x in the preview label (keep a reference so Tk does not drop it)."""
+        """Show x in the preview. The reference keeps Tk from freeing the image."""
         self.preview_photo = preview_image(x)
         self.preview.config(image=self.preview_photo)
 
 
 def print_and_ok(x):
-    """Callback for manual checks: print the image in the terminal."""
+    """Callback for manual checks. Prints the image in the terminal."""
     print(to_ascii(x), end="\n\n")
     return "OK"
 

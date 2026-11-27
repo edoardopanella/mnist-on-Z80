@@ -1,33 +1,25 @@
 """
-focus.py - Focus on hover: the part of the window under the mouse stays sharp,
-the others fade behind a veil.
+focus.py - Focus on hover: the part under the mouse stays sharp, the others fade.
 
-Tk cannot blur or fade a widget, so each part gets its own veil: a borderless
-window, VEIL_ALPHA opaque, in the window's background colour, laid exactly
-over the part. The parts keep updating under it. The focused part also gets a
-blue border: four thin windows of the same kind along its edges, inside it,
-so the layout does not move (Tk on macOS does not draw a frame's highlight ring).
+Tk cannot fade a widget, so each part gets a veil: a borderless, semi-transparent
+window in the background colour, placed over it. The focused part gets a blue
+border made of four thin windows (Tk on macOS draws no highlight ring on frames).
 
-HoverFocus checks the mouse every POLL_MS instead of using <Enter>/<Leave>:
-those also fire on every child widget and on the veils themselves, which would
-make the focus jump. The rules:
-    mouse over a part             that part in focus, veils on all the others
-    mouse in a gap between parts  the focus stays where it was (no flicker)
-    mouse outside the window,
-    or another app in front       no veils
-    the window moves              no veils, until it has been still for SETTLE_MS
-The veils are separate windows, and while the window is dragged Tk learns its
-new position only now and then: veils moved along would trail behind it. So a
-move (a <Configure> of the window, or a new position seen by the poll) hides
-them at once, and the poll brings them back when the window stops.
-A veil takes the click meant for the part under it, but the mouse focuses a
-part as soon as it moves over it, so a click almost never meets a veil.
+The mouse is polled every POLL_MS, because <Enter>/<Leave> also fire on child
+widgets and on the veils, which makes the focus jump.
+    over a part                    that part in focus, the others veiled
+    in a gap between parts         focus stays where it was
+    outside the window, or
+    another app in front           no veils
+    window moving                  no veils until it is still for SETTLE_MS
+Veils hide while the window moves because Tk reports its position too rarely
+for them to follow smoothly.
 """
 
 import time
 import tkinter as tk
 
-VEIL_ALPHA = 0.75           # 1 = the faded parts disappear, 0 = no fading
+VEIL_ALPHA = 0.75           # 1 hides the other parts, 0 does not fade them
 POLL_MS = 80
 SETTLE_MS = 250             # veils come back this long after the window stopped moving
 BORDER = 2                  # px of the focus ring
@@ -52,7 +44,7 @@ class HoverFocus:
         root.after(POLL_MS, self._tick)
 
     def _window(self, colour, alpha):
-        """A borderless window that stays above root: a veil or a side of the ring."""
+        """A borderless window above root, used for a veil or one side of the ring."""
         w = tk.Toplevel(self.root, bg=colour)
         w.overrideredirect(True)
         w.transient(self.root)          # stays above the window when a click raises it
@@ -68,11 +60,11 @@ class HoverFocus:
     # --- the window and the mouse ------------------------------------------------
 
     def _on_configure(self, event):
-        if event.widget is self.root:           # the toplevel's tag also gets its children's
+        if event.widget is self.root:           # skip the children's <Configure> events
             self._check_moved()
 
     def _check_moved(self):
-        """Hide everything if the window moved since the last look. True while it is settling."""
+        """Hide everything if the window moved. Returns True while it is still settling."""
         pos = (self.root.winfo_rootx(), self.root.winfo_rooty())
         if pos != self.root_pos:
             if self.root_pos is not None:
@@ -94,10 +86,10 @@ class HoverFocus:
             self.root.after(POLL_MS, self._tick)
 
     def _app_active(self):
-        """False while another application is in front (Tk then has no focus widget)."""
+        """False while another app is in front (Tk then has no focus widget)."""
         try:
             return self.root.focus_get() is not None
-        except KeyError:                        # focus on a widget Tk cannot name (a dialog)
+        except KeyError:                        # focus is on a widget Tk cannot name, like a dialog
             return True
 
     @staticmethod
@@ -110,13 +102,13 @@ class HoverFocus:
     # --- veils and ring ----------------------------------------------------------
 
     def _hide(self):
-        """Veils and ring off, focus kept: the next _set() places them again."""
+        """Hide veils and ring but keep the focus. The next _set() shows them again."""
         for w in self.veils + self.ring:
             w.withdraw()
         self.shown = None
 
     def _set(self, part):
-        """Focus part (None: no focus). Moves the veils only when something changed."""
+        """Focus part, or nothing if None. Only moves the veils when something changed."""
         rects = tuple((p.winfo_rootx(), p.winfo_rooty(), p.winfo_width(), p.winfo_height())
                       for p in self.parts) if part is not None else ()
         if (part, rects) == self.shown:

@@ -11,7 +11,7 @@ from draw import preprocess  # noqa: E402
 
 
 def blank():
-    """An empty canvas as DrawingApp creates it."""
+    """An empty canvas."""
     return Image.new("L", (280, 280), 0)
 
 

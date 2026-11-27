@@ -1,15 +1,14 @@
 """
-z80debug.py - What the debug panel shows, independent of where the Z80 runs.
+z80debug.py - Data for the debug panel, wherever the Z80 runs.
 
     MapSymbols       symbols and memory-map blocks from a z88dk .map file
-    Snapshot         one capture: registers, stack, call stack, a memory window, access map
-    SnapshotSource   captures through the G and M commands (emulator or board)
-    LiveSource       reads the patched z88dk-ticks' shared file (make ticks-viz), any time
+    Snapshot         one capture: registers, stack, call stack, memory window, accesses
+    SnapshotSource   captures with the G and M commands (emulator or board)
+    LiveSource       reads the shared file of the patched z88dk-ticks (make ticks-viz)
 
-A source has capture(view_addr, view_len) -> Snapshot. SnapshotSource talks to the Z80,
-so it must run in the same thread as the other Z80 commands: draw.py runs
-both in its worker thread. LiveSource only reads memory shared with ticks, so
-it can run in Tk's thread while the Z80 works.
+Both sources have capture(view_addr, view_len) -> Snapshot. SnapshotSource
+sends commands, so it must run in the worker thread with the other commands.
+LiveSource only reads shared memory, so it can run in Tk's thread at any time.
 """
 
 import mmap
@@ -22,37 +21,37 @@ from dataclasses import dataclass
 import numpy as np
 
 READ, WRITE, PROG = 1, 2, 4     # bits of Snapshot.activity, one byte per address
-VIEW_BYTES = 256                # memory window, hex view: 16 rows of 16 bytes
-IMG_W = 28                      # image view: pixels per row (the MNIST frame)
-STACK_BYTES = 256               # bytes from SP upwards (= STACK_COPY in z80_serial_main.c)
-LIVE_STACK_BYTES = 1024         # live: free to read, deep enough for main's frame
+VIEW_BYTES = 256                # hex view: 16 rows of 16 bytes
+IMG_W = 28                      # image view: pixels per row
+STACK_BYTES = 256               # bytes read from SP up (STACK_COPY in z80_serial_main.c)
+LIVE_STACK_BYTES = 1024         # live reads are free, so read deep enough for main's frame
 MAX_FRAMES = 8                  # call stack depth
 
-# Variables of firmware/z80_serial_main.c offered in the memory view
+# Variables of firmware/z80_serial_main.c listed in the memory view
 VARIABLES = ("_weights", "_x", "_trace", "_line", "_buf", "_regs")
-# Blocks of the memory map: variable -> what it is for
+# Memory-map block title for each variable
 BLOCK_TITLES = {"_weights": "Weights", "_x": "Image", "_trace": "Results",
                 "_buf": "Serial", "_line": "Serial", "_stack_copy": "Debug", "_regs": "Debug"}
-FREE_MIN = 1024                 # smaller gaps join a neighbouring block
+FREE_MIN = 1024                 # smaller gaps are merged into a neighbouring block
 
 N_IN, N_HID, N_OUT = 784, 32, 10      # firmware/nn.h
 TRACE_SIZE = 4 * N_HID + N_HID + 4 * N_OUT     # struct nn_trace: acc1, h_q, acc2
 # struct nn_weights (no padding, docs/spec.md §7.2): W1q, b1q, M0, shift, W2q, b2q
 W2Q_OFS = N_HID * N_IN + 4 * N_HID + 4 + 1     # 25,221
 WEIGHTS_SIZE = W2Q_OFS + N_OUT * N_HID + 4 * N_OUT     # 25,581
-# Functions of firmware/nn.c: the PC or a return address in one of them = inside nn_infer
+# Functions of firmware/nn.c. Any of them on the call stack means we are inside nn_infer.
 NN_FUNCS = ("_nn_infer", "_layer1_neuron", "_requant", "_layer2_neuron")
 
 _MAP_LINE = re.compile(r"^(\w+)\s+= \$([0-9A-F]{4}) ; (\w+), ")
-# Compiler-made labels: no use as names in the stack view
+# Compiler-generated labels, not useful as names in the stack view
 _LOCAL_LABEL = re.compile(r"^(i_\d+|l_\w+_\d{5}|___str_\d+|loop_?\d*)$")
 
 
 class MapSymbols:
-    """Symbols of one build, read from the .map file z88dk writes with -m.
+    """Symbols of one build, from the .map file z88dk writes with -m.
 
-    addr:   name -> address of code and variables (C names start with '_')
-    const:  name -> value of linker constants (__head, __BSS_END_tail, ...)
+    addr    name -> address of code and variables (C names start with '_')
+    const   name -> value of linker constants (__head, __BSS_END_tail, ...)
     """
 
     def __init__(self, path):
@@ -64,12 +63,12 @@ class MapSymbols:
                 (self.addr if kind == "addr" else self.const)[name] = value
         self._named = sorted((a, n) for n, a in self.addr.items()
                              if not n.startswith("__") and not _LOCAL_LABEL.match(n))
-        # Section boundaries are addresses too; other constants are plain numbers.
+        # Section boundaries are addresses too. Other constants are plain numbers.
         self._bounds = sorted(v for n, v in self.const.items()
                               if n.startswith("__") and n.endswith(("_head", "_tail")))
         self.code = (self.const["__head"], self.const["__CODE_END_tail"])
         self.data = (self.const["__data_crt_head"], self.const["__BSS_END_tail"])
-        self.stack_top = self.const["__register_sp"] or 0x10000    # 0: SP wraps to 0xFFFF
+        self.stack_top = self.const["__register_sp"] or 0x10000    # SP = 0 wraps to 0xFFFF
 
     def __getitem__(self, name):
         return self.addr[name]
@@ -77,8 +76,8 @@ class MapSymbols:
     def nearest(self, addr):
         """'name+0xNN' for the closest named symbol at or below addr.
 
-        None outside code and data (free memory, stack): the closest symbol
-        there would be the last variable, which says nothing.
+        None outside code and data, where the closest symbol would be
+        meaningless.
         """
         if not (self.in_code(addr) or self.data[0] <= addr < self.data[1]):
             return None
@@ -101,15 +100,13 @@ class MapSymbols:
         return min(later) - start if later else 0
 
     def blocks(self, sp=None):
-        """The memory map as named blocks: [(title, start, end)], in address order.
+        """The memory map as [(title, start, end)] covering 0x0000-0xFFFF with no gaps.
 
-        They cover 0x0000-0xFFFF without gaps. Program, the variables of
-        BLOCK_TITLES (adjacent ones with the same title become one block),
-        Stack. The stack block starts on a 256-byte boundary at least
-        STACK_BYTES below sp, so the next calls' pushes fall inside it (and
-        it moves only now and then). Gaps of FREE_MIN bytes or more are
-        Free; smaller ones join the block before them, or the one after when
-        the block before is Free.
+        Blocks are Program, the variables in BLOCK_TITLES (neighbours with the
+        same title are merged) and Stack. Stack starts on a 256-byte boundary at
+        least STACK_BYTES below sp, so it has room for pushes and rarely moves.
+        Gaps of FREE_MIN bytes or more become Free. Smaller gaps join the
+        block before them, or the one after if the one before is Free.
         """
         if sp is None or not self.data[1] <= sp <= self.stack_top:
             sp = self.stack_top
@@ -123,7 +120,7 @@ class MapSymbols:
         named = [b for b in sorted(named, key=lambda b: b[1]) if b[1] < b[2]]
 
         out = []
-        pos, carry = 0, None            # carry: start of a small gap after Free
+        pos, carry = 0, None            # carry = start of a small gap after a Free block
         for title, start, end in named + [(None, 0x10000, 0x10000)]:
             if start - pos >= FREE_MIN:
                 out.append(["Free", pos, start])
@@ -141,7 +138,7 @@ class MapSymbols:
             else:
                 out.append([title, start, end])
             pos = end
-        if out[-1][2] < 0x10000:        # nothing follows the last block
+        if out[-1][2] < 0x10000:        # extend the last block to the end
             out[-1][2] = 0x10000
         return [tuple(b) for b in out]
 
@@ -154,19 +151,16 @@ class MapSymbols:
 
 
 def image_bytes(bits, rows=IMG_W):
-    """Bytes the image view needs for rows of IMG_W pixels: one byte or one bit per pixel."""
+    """Bytes needed for rows of IMG_W pixels, at one bit or one byte per pixel."""
     return (rows * IMG_W + 7) // 8 if bits else rows * IMG_W
 
 
 def image_rows(data, bits, rows=IMG_W):
-    """Memory as a picture: (value, offset), both (rows, IMG_W).
+    """Memory as a picture. Returns (value, offset), both shaped (rows, IMG_W).
 
-    value: the pixel. offset: the byte of data each pixel comes from, for its
-    access colour.
-    bits False: one byte per pixel, as int8: x (the unpacked image) is 0/1,
-    and at weights each 784 bytes are one hidden neuron's W1q row.
-    bits True: one bit per pixel, 0/1, most significant first (buf, the image
-    as the laptop sends it: docs/spec.md, I command). A row is then 3.5 bytes.
+    value is the pixel, offset the index of the byte it comes from.
+    bits=False: one int8 per pixel. Good for x (0/1) and for W1q rows.
+    bits=True: one bit per pixel, MSB first, as in buf (the packed image).
     Pixels past the end of data are 0.
     """
     n = rows * IMG_W
@@ -185,24 +179,23 @@ def image_rows(data, bits, rows=IMG_W):
 class Snapshot:
     regs: dict              # z80nn.REG_NAMES -> int
     stack: list             # (address, word) from SP upwards
-    frames: list            # call stack, innermost first: (code address, symbol), PC first
+    frames: list            # call stack as (code address, symbol), PC first
     view_addr: int
-    view: bytes             # the memory window: view_len bytes from view_addr
+    view: bytes             # view_len bytes from view_addr
     activity: np.ndarray    # (65536,) uint8, READ | WRITE | PROG bits
     acc2: list              # the 10 output scores, decoded from _trace
-    live: bool              # True: real accesses; False: bytes that changed between captures
-    tstates: int = None     # live sources only
+    live: bool              # True: real accesses. False: bytes changed since the last capture
+    tstates: int = None     # live only
 
 
 class SnapshotSource:
-    """Captures through G and M. Works on the emulator and on the board.
+    """Captures with G and M. Works on the emulator and on the board.
 
-    It cannot see the bus, so activity has only WRITE bits: the bytes of the
-    watched areas (variables but not the weights, stack, memory window) that
-    changed since the previous capture.
+    It cannot see the bus, so activity only has WRITE bits, for bytes that
+    changed since the last capture. Watched areas are the variables (not the
+    weights), the stack and the memory window.
 
-    The stack comes from the firmware's stack_copy, taken with the registers:
-    by the time M runs, G and M have reused the real stack area.
+    The stack is read from stack_copy, because G and M overwrite the real one.
     """
 
     live = False
@@ -249,12 +242,11 @@ class SnapshotSource:
 
 
 def call_stack(regs, stack_bytes, sym):
-    """Follow SDCC's frame chain: IX points at the caller's saved IX, the return address is above it.
+    """Follow SDCC's frame chain. IX points at the caller's saved IX, with the return address above it.
 
-    stack_bytes are the bytes from SP. SP and IX can be odd (SDCC pushes single
-    bytes), so words are read at any offset. Functions that do not set up IX
-    (small leaf functions, library helpers) do not appear. Stops when the
-    chain leaves the bytes read.
+    stack_bytes start at SP. SP and IX can be odd, so words are read at any
+    offset. Functions that do not set up IX (small leaves, library helpers)
+    are missing. Stops when the chain leaves stack_bytes.
     """
     sp = regs["sp"]
 
@@ -269,24 +261,23 @@ def call_stack(regs, stack_bytes, sym):
         if saved is None or ret is None or not sym.in_code(ret):
             break
         frames.append((ret, sym.nearest(ret)))
-        if saved <= ix:         # the saved IX must be higher up the stack
+        if saved <= ix:         # a valid saved IX is higher up the stack
             break
         ix = saved
     return frames
 
 
 def infer_step(snap, sym):
-    """Where nn_infer is, from the weights the Z80 read since the previous capture.
+    """Where nn_infer is, based on which weight rows were read since the last capture.
 
-    layer1_neuron(j) reads only row j of W1q (784 bytes, at the lit pixels),
-    layer2_neuron(k) only row k of W2q (32 bytes), so the rows read say which
-    neuron it is on. Returns
-        None            not inside nn_infer (by the call stack)
+    layer1_neuron(j) only reads row j of W1q and layer2_neuron(k) only row k
+    of W2q. Returns
+        None            not inside nn_infer
         ("layer1", j)   computing hidden neuron j
         ("layer2", k)   computing the score of digit k
-        ("trace", None) copying the results into trace (the last step)
-        ("", None)      inside nn_infer, but no weights read this time
-    Needs read bits, so only live sources give more than None / ("", None).
+        ("trace", None) copying the results into trace
+        ("", None)      inside nn_infer, but no weights read
+    Only live sources have read bits, so snapshots only give None or ("", None).
     """
     if not any(name and name.split("+")[0] in NN_FUNCS for _, name in snap.frames):
         return None
@@ -314,12 +305,12 @@ def decode_acc2(trace):
 
 
 def flags(af):
-    """The F register as 'SZ5H3PNC', with '.' for the bits that are clear."""
+    """The F register as 'SZ5H3PNC', with '.' for clear bits."""
     f = af & 0xFF
     return "".join(c if f & (0x80 >> k) else "." for k, c in enumerate("SZ5H3PNC"))
 
 
-# --- Live view: the file shared with the patched z88dk-ticks (tools/ticks-viz.patch) ----
+# --- Live view: file shared with the patched z88dk-ticks (tools/ticks-viz.patch) ----
 
 SHM_SIZE = 64 + 2 * 65536
 SHM_RAM, SHM_ACT = 64, 64 + 65536
@@ -327,11 +318,11 @@ SPEED_OFS, PAUSED_OFS = 12, 16
 
 
 class LiveSource:
-    """Registers, memory and accesses of the running emulator, read from its -shm file.
+    """Registers, memory and accesses of the running emulator, from its -shm file.
 
-    Layout (viz.h in the patch): header with seq, speed, pause, T-states and
-    registers, then the emulated RAM itself, then one byte of access bits per
-    address. ticks sets the bits, capture() takes them and clears them.
+    Layout (viz.h in the patch): a header with seq, speed, pause, T-states
+    and registers, then the emulated RAM, then one byte of access bits per
+    address. ticks sets the bits and capture() clears them.
     """
 
     live = True
@@ -356,7 +347,7 @@ class LiveSource:
         self.act = np.frombuffer(self.m, dtype=np.uint8, count=65536, offset=SHM_ACT)
 
     def _header(self):
-        """(tstates, regs) from a consistent publish: seq is odd while ticks writes."""
+        """(tstates, regs), retried until consistent. seq is odd while ticks writes."""
         for _ in range(1000):
             seq = struct.unpack_from("<I", self.m, 8)[0]
             tstates, = struct.unpack_from("<Q", self.m, 24)
@@ -368,11 +359,10 @@ class LiveSource:
         return tstates, dict(zip(names, words))
 
     def idle_tstates(self, timeout=0.2):
-        """T-states since ticks started, once they stop moving.
+        """T-states since ticks started, once the count stops moving.
 
-        Between commands the Z80 waits in a blocking read and ticks publishes
-        before it blocks: a reply can reach the laptop just before that last
-        publish, so wait until two reads agree.
+        ticks publishes just before it blocks waiting for input, and a reply
+        can arrive before that. So wait until two reads agree.
         """
         last = self._header()[0]
         deadline = time.monotonic() + timeout
@@ -395,7 +385,7 @@ class LiveSource:
         view_addr &= 0xFFFF
         tstates, regs = self._header()
         activity = self.act.copy()
-        self.act[:] = 0         # a bit set between copy and clear is lost: one frame
+        self.act[:] = 0         # bits set between copy and clear are lost, which is fine
         sp = regs["sp"]
         stack_len = max(0, min(LIVE_STACK_BYTES, sym.stack_top - sp)) & ~1
         stack_bytes = self.read(sp, stack_len)
@@ -411,7 +401,7 @@ class LiveSource:
 
     @speed.setter
     def speed(self, hz):
-        """Emulated clock in Hz, 0 = as fast as the laptop can."""
+        """Emulated clock in Hz. 0 means as fast as possible."""
         struct.pack_into("<I", self.m, SPEED_OFS, int(hz))
 
     @property

@@ -1,15 +1,15 @@
-/* Register snapshot for z80_serial_main.c (the G command).
+/* Register snapshot for the G command in z80_serial_main.c.
  *
  * snap_regs() copies every register into the global regs. SP and PC are the
- * caller's: SP as it was before the call, PC = the return address (the
- * instruction after the call). Before the first call regs is all zero.
+ * caller's: SP is its value before the call, PC is the return address.
+ * regs is all zero until the first call.
  */
 #ifndef SNAPREGS_H
 #define SNAPREGS_H
 
 #include <stdint.h>
 
-/* Offsets are hard-coded in snapregs.c, keep the order. */
+/* snapregs.c hard-codes these offsets */
 struct regs {
     uint16_t af, bc, de, hl;        /*  0  2  4  6 */
     uint16_t ix, iy, sp, pc;        /*  8 10 12 14 */

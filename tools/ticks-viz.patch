@@ -74,7 +74,7 @@ diff -ruN a/src/ticks/memory.c b/src/ticks/memory.c
  static void standard_init(void) 
  {
 -    mem = calloc(65536, 1);
-+    mem = viz ? viz->ram : calloc(65536, 1);    // -shm: the host sees memory live
++    mem = viz ? viz->ram : calloc(65536, 1);    // with -shm, RAM lives in the shared file
      get_mem_addr = standard_get_memory_addr;
  }
  
@@ -152,8 +152,8 @@ diff -ruN a/src/ticks/viz.c b/src/ticks/viz.c
 +struct viz *viz = NULL;
 +long long   viz_next = 0;
 +
-+static uint32_t  base_hz;       /* speed the clock base below refers to */
-+static long long base_st;       /* st and wall time when that speed started */
++static uint32_t  base_hz;       /* speed in effect since base_st/base_s */
++static long long base_st;       /* st and wall time when it started */
 +static double    base_s;
 +static int       rebase = 1;    /* set after a pause or a blocking read */
 +
@@ -237,29 +237,29 @@ diff -ruN a/src/ticks/viz.c b/src/ticks/viz.c
 +void viz_idle(void)
 +{
 +    publish();
-+    rebase = 1;                 /* waiting for input is not time to catch up on */
++    rebase = 1;                 /* time spent waiting for input does not count */
 +}
 diff -ruN a/src/ticks/viz.h b/src/ticks/viz.h
 --- a/src/ticks/viz.h	1970-01-01 01:00:00
 +++ b/src/ticks/viz.h	2026-11-24 12:53:03
 @@ -0,0 +1,53 @@
-+/* viz: live view of the emulated Z80 for an outside program (mnist-on-Z80).
++/* viz: live view of the emulated Z80 for another program (mnist-on-Z80).
 + *
-+ * "-shm <file>" creates <file> and maps it shared. The host maps the same file
-+ * and reads it while the program runs:
++ * "-shm <file>" creates <file> and maps it shared. The host maps the same
++ * file and reads it while the program runs:
 + *
 + *   offset  size   field
 + *        0     4   magic "Z8VZ" (written last, when the file is ready)
 + *        4     4   version (1)
 + *        8     4   seq: odd while ticks writes regs/tstates, +2 per publish
-+ *       12     4   speed_hz   written by the host: 0 = as fast as possible
-+ *       16     4   paused     written by the host: non-zero = stop between instructions
++ *       12     4   speed_hz   set by the host, 0 means as fast as possible
++ *       16     4   paused     set by the host, non-zero stops between instructions
 + *       24     8   tstates
 + *       32    24   af bc de hl ix iy sp pc af' bc' de' hl' (uint16 each)
 + *       56     2   i, r
 + *       64 65536   ram: the emulated memory itself (standard memory model only)
-+ *    65600 65536   act: per address, bit 0 read, 1 write, 2 prog (instruction fetch);
-+ *                  ticks sets bits, the host clears them after drawing
++ *    65600 65536   act: per address, bit 0 read, 1 write, 2 prog (instruction fetch).
++ *                  ticks sets the bits, the host clears them after drawing
 + *
 + * All fields are little-endian (the host's byte order). Without -shm, ticks
 + * behaves exactly as before.

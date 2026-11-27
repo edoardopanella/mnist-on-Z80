@@ -1,29 +1,13 @@
 """
-network_view.py - The network, layer by layer, under the drawing.
+network_view.py - The network's values for one digit, shown under the drawing.
 
-What the Z80 computes for one digit, in the order it computes it:
+    Layer 1   one cell per hidden neuron, shaded by h_q. Clicking a cell
+              calls on_neuron(j), which shows that neuron's weights.
+    Layer 2   the 10 scores as bars, the answer in green.
 
-    Layer 1   32 cells, one per hidden neuron: its value h_q (0..127),
-              black = 0 (cut by ReLU) to white = the strongest of this digit
-              (the values are small next to 127). Hover: the sum (acc1),
-              ReLU and the rescaled value. Click: on_neuron(j), the debug
-              panel then shows that neuron's 784 weights as a 28x28 image.
-    Layer 2   the 10 scores (acc2), the highest in green: the answer.
-
-The headline says what happens now, and then the answer, in large type: with
-this view DrawingApp does not show its own result label.
-
-The values come from the D reply (z80nn.Z80NN.classify_debug): set_result()
-stores them in the worker thread, refresh() shows them in Tk's thread. In the
-live mode the debug panel calls show_step() 20 times a second with
-z80debug.infer_step(): the neuron being computed is outlined in the "read"
-colour, the ones already done turn grey (their values arrive with the reply).
-Outside nn_infer the step is None: before layer 1 the Z80 is unpacking the
-image ("before"), after layer 2 it writes the 74 results as decimal text and
-sends them ("send": with 32-bit divisions, about a third of the time).
-
-DrawingApp calls start(x) when a digit goes to the Z80, refresh() after the
-answer, clear() on Clear and after Stop.
+The values come from the D reply. set_result() stores them from the worker
+thread and refresh() draws them in Tk's thread. In live mode, show_step() is
+called 20 times a second and highlights the neuron being computed.
 """
 
 import tkinter as tk
@@ -35,15 +19,15 @@ WIDTH = 560                         # px, about the drawing + preview
 CELL, CELL_GAP = 16, 1              # hidden neuron cells
 CELL_H = 26
 ROW_H = 18                          # score rows
-CURRENT = "#c0c000"                 # being computed: the "read" colour of the memory map
-DONE = "#808080"                    # computed, value not back yet
+CURRENT = "#c0c000"                 # being computed (the memory map's "read" colour)
+DONE = "#808080"                    # computed, value not received yet
 EMPTY = "#909090"                   # outline of a cell not computed yet
 BEST, OTHER = "#20a040", "#9090a0"  # score bars
 GREY_TEXT = "#808080"
 
 
 def neuron_fill(h, top):
-    """h_q 0..top -> grey from almost black to almost white."""
+    """Grey for h, from near black at 0 to near white at top."""
     v = 28 + (240 - 28) * max(0, min(top, h)) // max(1, top)
     return "#%02x%02x%02x" % (v, v, v)
 
@@ -53,11 +37,11 @@ class NetworkView(tk.Frame):
     def __init__(self, master, on_neuron=None):
         super().__init__(master)
         self.on_neuron = on_neuron
-        self.values = None          # (acc1, h_q, acc2, digit) shown
+        self.values = None          # (acc1, h_q, acc2, digit) on screen
         self.pending = None         # set by set_result() in the worker thread
         self.running = False        # between start() and refresh()
         self.step = None            # z80debug.infer_step() while running (live only)
-        self.lit = 0                # lit pixels of the digit being computed
+        self.lit = 0                # lit pixels in the current digit
         base = tkfont.nametofont("TkDefaultFont")
         self.bold = base.copy()
         self.bold.config(weight="bold")
@@ -69,20 +53,20 @@ class NetworkView(tk.Frame):
         self._draw()
 
     def _build(self):
-        # two parts, for focus.HoverFocus: the headline goes with layer 1
+        # Two parts for focus.HoverFocus. The headline belongs to layer 1.
         l1 = tk.Frame(self)
         l1.pack(fill="x")
         self.headline = tk.Label(l1, anchor="w", justify="left", wraplength=WIDTH, font=self.bold)
         self.headline.pack(fill="x", pady=(0, 4))
         tk.Label(l1, text="Layer 1 · 32 hidden neurons", anchor="w", font=self.bold).pack(fill="x")
         tk.Label(l1, anchor="w", justify="left", wraplength=WIDTH, font=self.caption, fg=GREY_TEXT,
-                 text="Each neuron adds up its weights at the lit pixels (it has one weight per pixel); "
-                      "ReLU turns a negative sum into 0, then it is rescaled to 0..127. "
-                      "Black = 0, white = the strongest. Click one: its weights in Memory.").pack(fill="x")
+                 text="Each neuron has one weight per pixel and adds up the weights of the lit pixels. "
+                      "ReLU turns a negative sum into 0, then the sum is scaled to 0..127. "
+                      "Black is 0, white is the strongest. Click a neuron to see its weights in Memory.").pack(fill="x")
         self.hidden = tk.Canvas(l1, width=WIDTH, height=CELL_H + 16, highlightthickness=0,
                                 cursor="hand2")
         self.hidden.pack(anchor="w", pady=(4, 0))
-        self.hover = tk.Label(l1, anchor="w", font=self.caption, width=1)     # never widens the window
+        self.hover = tk.Label(l1, anchor="w", font=self.caption, width=1)     # width=1 so it never widens the window
         self.hover.pack(fill="x")
         self.text_fg = self.hover.cget("fg")
         self.hidden.bind("<Motion>", self._on_motion)
@@ -93,14 +77,14 @@ class NetworkView(tk.Frame):
         l2.pack(fill="x", pady=(6, 0))
         tk.Label(l2, text="Layer 2 · 10 scores, one per digit", anchor="w", font=self.bold).pack(fill="x")
         tk.Label(l2, anchor="w", justify="left", wraplength=WIDTH, font=self.caption, fg=GREY_TEXT,
-                 text="Each score adds 32 weights × the 32 hidden values. "
+                 text="Each score is the sum of 32 weights times the 32 hidden values. "
                       "The highest score is the answer.").pack(fill="x")
         self.scores = tk.Canvas(l2, width=WIDTH, height=N_OUT * ROW_H + 4, highlightthickness=0)
         self.scores.pack(anchor="w", pady=(4, 0))
         self.parts = [l1, l2]
 
     def focus_parts(self):
-        """The parts focus.HoverFocus can put in focus: layer 1 (with the headline), layer 2."""
+        """The parts focus.HoverFocus can focus: layer 1 (with the headline) and layer 2."""
         return self.parts
 
     # --- called by DrawingApp and DebugPanel ------------------------------------
@@ -114,11 +98,11 @@ class NetworkView(tk.Frame):
         self._draw()
 
     def set_result(self, acc1, h_q, acc2, digit):
-        """The D reply. May be called in the worker thread: only stores it."""
+        """Store the D reply. Safe to call from the worker thread."""
         self.pending = (list(acc1), list(h_q), list(acc2), digit)
 
     def refresh(self):
-        """After the answer: show the values of the reply."""
+        """Show the values stored by set_result()."""
         if self.pending is not None:
             self.values, self.pending = self.pending, None
         self.running = False
@@ -132,10 +116,11 @@ class NetworkView(tk.Frame):
         self._draw()
 
     def show_step(self, step):
-        """Live: where nn_infer is (z80debug.infer_step), or None outside it."""
+        """Live mode: step is z80debug.infer_step(), or None outside nn_infer."""
         if not self.running:
             return
-        if step is None:            # outside nn_infer: before it, or after it
+        # Outside nn_infer the Z80 is either unpacking the image or sending the results
+        if step is None:
             after = self.step is not None and self.step[0] in ("layer2", "trace", "send")
             step = ("send", None) if after else ("before", None)
         if step == self.step:
@@ -157,22 +142,22 @@ class NetworkView(tk.Frame):
             r = max((k for k in range(N_OUT) if k != d), key=lambda k: acc2[k])
             return f"Answer: {d}    (score {acc2[d]:,}; next best: {r}, {acc2[r]:,})"
         if not self.running:
-            return "Draw a digit and press Recognize: the Z80 computes the two layers below."
+            return "Draw a digit and press Recognize. The Z80 computes the two layers below."
         kind, n = self.step or ("", None)
         if kind == "layer1":
-            return f"Layer 1, neuron #{n}: adding its weights at the {self.lit} lit pixels"
+            return f"Layer 1, neuron #{n}: adding its weights for the {self.lit} lit pixels"
         if kind == "layer2":
-            return f"Layer 2, digit {n}: its 32 weights × the hidden values"
+            return f"Layer 2, digit {n}: 32 weights times the hidden values"
         if kind == "trace":
-            return "Network done: copying the results into trace"
+            return "Network done, copying the results into trace"
         if kind == "send":
-            return "Network done: writing the 74 results as text for the laptop"
+            return "Network done, sending the 74 results to the laptop as text"
         if kind == "before":
-            return f"Unpacking the image it received: {N_IN // 8} bytes → {N_IN} pixels"
+            return f"Unpacking the image: {N_IN // 8} bytes into {N_IN} pixels"
         return "The Z80 is computing…"
 
     def _progress(self):
-        """(hidden neurons done, current one or None, current score or None) while running."""
+        """(hidden neurons done, current neuron or None, current score or None)."""
         kind, n = self.step or ("", None)
         if kind == "layer1":
             return n, n, None
@@ -235,7 +220,7 @@ class NetworkView(tk.Frame):
         if j is None:
             if self.values is not None:
                 active = sum(1 for h in self.values[1] if h > 0)
-                text = f"{active} of 32 neurons active; the other {32 - active} are 0 after ReLU"
+                text = f"{active} of 32 neurons active, the other {32 - active} are 0 after ReLU"
             else:
                 text = ""
             self.hover.config(text=text, fg=GREY_TEXT)
@@ -245,7 +230,7 @@ class NetworkView(tk.Frame):
             text = f"Neuron #{j}: sum {s:,} → ReLU {max(0, s):,} → rescaled {h}"
         else:
             text = f"Neuron #{j}"
-        self.hover.config(text=text + f" · click: its {N_IN} weights in Memory", fg=self.text_fg)
+        self.hover.config(text=text + f" · click to see its {N_IN} weights", fg=self.text_fg)
 
     def _on_motion(self, event):
         self._show_hover(self._neuron_at(event.x))

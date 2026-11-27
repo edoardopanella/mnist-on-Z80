@@ -9,7 +9,7 @@
  *   [0] 0x42           program finished
  *   [1] digit          computed by nn_infer on the Z80
  *   [2] expected digit from testvec.bin
- *   [3] 0x00 = acc1, h_q, acc2 and digit all match; otherwise the first mismatch:
+ *   [3] 0x00 if acc1, h_q, acc2 and digit all match, else the first mismatch:
  *       0x01 acc1, 0x02 h_q, 0x03 acc2, 0x04 digit
  *   [4] index of the first mismatching element (0 when [3] is 0x00 or 0x04)
  */
@@ -35,7 +35,7 @@ _Static_assert(sizeof(struct nn_weights) == 25581, "nn_weights layout != weights
 
 static struct nn_trace trace;
 
-/* Little-endian int32 at p; the Z80 is little-endian, so memcpy is exact. */
+/* Little-endian int32 at p. The Z80 is little-endian too, so memcpy is enough. */
 static int32_t rd_i32(const uint8_t *p)
 {
     int32_t v;
@@ -49,7 +49,7 @@ static void report(uint8_t digit, uint8_t what, uint8_t index)
     MAILBOX[2] = CASE[REC_DIGIT];
     MAILBOX[3] = what;
     MAILBOX[4] = index;
-    MAILBOX[0] = 0x42;               /* written last: "results are ready" */
+    MAILBOX[0] = 0x42;               /* written last, so it means "results ready" */
 }
 
 int main(void)

@@ -1,9 +1,9 @@
-/* Register snapshot: see snapregs.h. */
+/* Register snapshot, see snapregs.h. */
 #include "snapregs.h"
 
-struct regs regs;                   /* not static: the asm below refers to _regs */
+struct regs regs;                   /* not static, the asm refers to _regs */
 
-/* HL and AF are saved first because the code below uses them. */
+/* HL and AF are saved first because the rest of the code overwrites them. */
 void snap_regs(void) __naked
 {
     __asm
@@ -21,7 +21,7 @@ void snap_regs(void) __naked
     pop hl
     push hl
     ld  (_regs+14), hl
-    defb 0x08                       ; ex af,af (written as a byte: the quote confuses the C preprocessor)
+    defb 0x08                       ; ex af,af as a raw byte (its quote would confuse the C preprocessor)
     push af
     pop hl
     ld  (_regs+16), hl

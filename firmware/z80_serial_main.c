@@ -6,9 +6,9 @@
  *   C                  -> "C xxxx"  16-bit sum of the whole payload
  *   I <196 hex>        -> "R d"     classify a packed image (98 bytes, MSB = first pixel)
  *   D <196 hex>        -> "A1 ...", "H ...", "A2 ...", "R d"
- *   G                  -> "G af bc de hl ix iy sp pc af' bc' de' hl' i r"  registers
- *                         snapped right after the last I/D inference (all 0 before), hex;
- *                         stack_copy holds the 256 bytes from that SP (read it with M)
+ *   G                  -> "G af bc de hl ix iy sp pc af' bc' de' hl' i r"  in hex,
+ *                         saved right after the last I/D (all 0 before). stack_copy
+ *                         holds the 256 bytes from that SP (read it with M)
  *   M aaaa nn          -> "M <2*nn hex>"  read nn bytes (01..40 hex) from address aaaa
  * Errors: ERR CMD, ERR HEX, ERR LEN, ERR OFS, ERR LONG. The program keeps running.
  *
@@ -38,7 +38,7 @@ static struct nn_trace trace;
 static uint8_t x[N_IN];
 static uint8_t buf[MAX_CHUNK > IMG_BYTES ? MAX_CHUNK : IMG_BYTES];
 static char line[LINE_MAX + 1];
-/* The stack as it was at the snapshot: G and M reuse that area for their own frames. */
+/* Copy of the stack at the snapshot. G and M overwrite the real one with their own frames. */
 static uint8_t stack_copy[STACK_COPY];
 
 /* --- Serial I/O ------------------------------------------------------------ */
@@ -103,7 +103,7 @@ static void put_hex4(uint16_t v)
     put_hex2((uint8_t)v);
 }
 
-/* Decimal int32 without printf (smaller, and no %ld support to configure). */
+/* int32 in decimal. No printf: it is bigger and needs %ld support configured. */
 static void put_i32(int32_t v)
 {
     char d[10];
@@ -244,7 +244,7 @@ static void cmd_infer(const char *arg, uint8_t len, uint8_t debug)
             *p++ = (buf[i] & bit) ? 1 : 0;
 
     digit = nn_infer(&weights, x, debug ? &trace : NULL);
-    snap_regs();                        /* for G: the registers right after inference */
+    snap_regs();                        /* saved for G */
     memcpy(stack_copy, (const void *)regs.sp, STACK_COPY);
 
     if (debug) {
@@ -260,7 +260,7 @@ static void cmd_infer(const char *arg, uint8_t len, uint8_t debug)
     ser_putc('\n');
 }
 
-/* "G": the snapshot taken by the last I/D, 12 words then I and R. */
+/* "G": registers saved by the last I/D, 12 words then I and R. */
 static void cmd_regs(void)
 {
     const uint16_t *w = (const uint16_t *)&regs;
@@ -278,7 +278,7 @@ static void cmd_regs(void)
     ser_putc('\n');
 }
 
-/* "M aaaa nn": arg points at aaaa. Any address is allowed; it wraps at 0xFFFF. */
+/* "M aaaa nn": arg points at aaaa. Any address is allowed, reads wrap at 0xFFFF. */
 static void cmd_memory(const char *arg, uint8_t len)
 {
     uint16_t addr;
@@ -312,7 +312,7 @@ int main(void)
     for (;;) {
         len = read_line();
         if (len == -2)
-            return 0;                   /* end of input: the host closed the pipe */
+            return 0;                   /* the host closed the pipe */
         if (len == -1) {
             reply("ERR LONG");
             continue;

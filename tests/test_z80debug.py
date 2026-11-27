@@ -1,7 +1,7 @@
-"""host/z80debug.py: map parsing, and snapshots through G/M on the emulated Z80.
+"""Tests for host/z80debug.py (map parsing, G/M snapshots) and the Tk panels.
 
-The map tests need build/emu.map and build/board.map (make emu rom); the
-snapshot tests also need z88dk-ticks. Missing pieces are skipped.
+Map tests need build/emu.map and build/board.map (make emu rom). Snapshot
+tests also need z88dk-ticks. Tests with missing pieces are skipped.
 """
 
 import os
@@ -64,7 +64,7 @@ def test_map_board_layout():
     sym = symbols_for("board-rom")
     assert sym.code[0] == 0x0000 and sym.code[1] <= 0x8000     # ROM
     assert sym.data[0] >= 0x8000                               # RAM
-    assert sym.stack_top == 0x10000                            # SP starts at 0: wraps to 0xFFFF
+    assert sym.stack_top == 0x10000                            # SP starts at 0 and wraps to 0xFFFF
 
 
 def test_flags():
@@ -140,7 +140,7 @@ def test_worker_runs_jobs_in_order_off_the_tk_thread():
 
 
 def test_drawing_app_stop():
-    """Stop drops the running answer; Recognize while busy stops, then runs the new drawing."""
+    """Stop drops the running answer. Recognize while busy stops, then runs the new drawing."""
     tk = pytest.importorskip("tkinter")
     from draw import DrawingApp
 
@@ -212,14 +212,14 @@ def test_image_rows():
     assert len(packed) == image_bytes(True) == 98 and image_bytes(False) == 784
     lit, offset = image_rows(packed, bits=True)
     assert (lit == img).all() and offset[1, 0] == 3 and offset[3, 5] == (3 * 28 + 5) // 8
-    lit, _ = image_rows(packed[:50], bits=True)                 # short read: the rest is dark
+    lit, _ = image_rows(packed[:50], bits=True)                 # short read, the rest is dark
     assert lit[27].sum() == 0
-    value, _ = image_rows(bytes([0x7F, 0x80, 0xFF, 0x05]), bits=False)    # weights: int8
+    value, _ = image_rows(bytes([0x7F, 0x80, 0xFF, 0x05]), bits=False)    # weights are int8
     assert list(value[0, :5]) == [127, -128, -1, 5, 0]
 
 
 def test_snapshot_image_views(source):
-    """After a real inference, x (bytes) and buf (bits) both show the digit that was sent."""
+    """After an inference, x (bytes) and buf (bits) both show the digit that was sent."""
     from export import read_test_vectors
     from z80debug import image_bytes, image_rows
 
@@ -231,14 +231,14 @@ def test_snapshot_image_views(source):
     buf = source.capture(sym["_buf"], image_bytes(True))
     assert len(x.view) == 784 and len(buf.view) == 98
     assert (image_rows(x.view, bits=False)[0] == expected).all()
-    # buf[0..2] hold the arguments of the capture's own last M command (cmd_memory
-    # parses into buf): 24 bits of row 0. The rest is the image that was sent.
+    # cmd_memory parses its arguments into buf, so the capture's last M command
+    # overwrote buf[0..2] (24 bits of row 0). The rest is the image.
     lit = image_rows(buf.view, bits=True)[0]
     assert (lit[1:] == expected[1:]).all() and (lit[0, 24:] == expected[0, 24:]).all()
 
 
 def fake_panel(tk, memory, stack_words=100):
-    """A DebugPanel on a fake Z80: memory is a 64 KB bytearray, captures are synchronous."""
+    """A DebugPanel on a fake Z80. memory is a 64 KB bytearray, and captures are synchronous."""
     from debug_panel import DebugPanel
     from z80debug import Snapshot
 
@@ -279,7 +279,7 @@ def test_infer_step(build):
     assert step(reads=[w + 784 * 12 + 5, w + 784 * 12 + 700]) == ("layer1", 12)
     assert step(reads=[w + 784 * 31 + 783]) == ("layer1", 31)
     assert step(reads=[w + 25221 + 32 * 4 + 1]) == ("layer2", 4)                  # W2q row 4
-    assert step(reads=[w + 25221 - 1]) == ("", None)                              # shift: no row
+    assert step(reads=[w + 25221 - 1]) == ("", None)                              # shift, not a row
     assert step(writes=[sym["_trace"] + 3]) == ("trace", None)
     assert step() == ("", None)
     assert step(reads=[w + 784 * 3], frames=[("l_mult+0x2",), ("_nn_infer+0x40",)]) == ("layer1", 3)
@@ -297,9 +297,9 @@ def test_panel_memory_scrolling():
         panel._on_view_mode()
         panel.set_view(0x1000)
         assert panel.snap.view_addr == 0x1000 and len(panel.snap.view) == 256
-        panel._on_mem_wheel(SimpleNamespace(num=0, delta=-1))            # macOS: one step down
+        panel._on_mem_wheel(SimpleNamespace(num=0, delta=-1))            # macOS, one step down
         assert panel.view_addr == 0x1010
-        panel._on_mem_wheel(SimpleNamespace(num=0, delta=240))           # Windows: two notches up
+        panel._on_mem_wheel(SimpleNamespace(num=0, delta=240))           # Windows, two notches up
         assert panel.view_addr == 0x0FF0
         panel._scroll_pages(1)
         assert panel.view_addr == 0x10F0 and panel.snap.view_addr == 0x10F0
@@ -352,7 +352,7 @@ def test_panel_image_view():
 
 
 def test_hover_focus():
-    """The part under the mouse in focus, veils on the others; gaps keep it; outside: none."""
+    """The part under the mouse is focused and the others veiled. Gaps keep the focus, outside clears it."""
     tk = pytest.importorskip("tkinter")
     from focus import HoverFocus
     try:
@@ -390,7 +390,7 @@ def test_hover_focus():
         assert shown() == [False] * 3                                    # hidden at once
         point(p1.winfo_rootx() + 5, p1.winfo_rooty() + 5)
         assert shown() == [False] * 3                                    # still settling
-        focus.moved_at -= 1                                              # ... it stopped
+        focus.moved_at -= 1                                              # now it has settled
         point(p1.winfo_rootx() + 5, p1.winfo_rooty() + 5)
         assert focus.current is p1 and shown() == [True, False, True]
         assert focus.veils[0].winfo_rootx() == parts[0].winfo_rootx()   # at the new place

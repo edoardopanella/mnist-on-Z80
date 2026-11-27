@@ -1,5 +1,6 @@
+/* Toolchain sanity check: computes 1 + ... + 10 = 55 and writes
+ * 0x42 (done), then the sum's low and high byte, to the mailbox at 0xF000. */
 #include <stdint.h>
-
 
 #define MAILBOX ((volatile uint8_t *)0xF000)
 

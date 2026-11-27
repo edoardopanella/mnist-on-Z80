@@ -1,11 +1,11 @@
-"""The patched z88dk-ticks (make ticks-viz) and host/z80debug.py LiveSource.
+"""Tests for the patched z88dk-ticks (make ticks-viz) and z80debug.LiveSource.
 
     - with -shm, all 105 test vectors still match on both builds
-    - the shared file shows the RAM, the registers and real accesses
-    - the speed setting holds the emulated clock, Pause stops it
-    - without -shm the patched ticks works as before
+    - the shared file shows RAM, registers and real accesses
+    - speed throttles the emulated clock and Pause stops it
+    - without -shm the patched ticks behaves as before
 
-Skipped when build/ticks-viz is not built.
+Skipped if build/ticks-viz is not built.
 """
 
 import os
@@ -97,7 +97,7 @@ def test_inference_accesses(live):
     act = snap.activity
     assert snap.acc2 == rec["acc2"].tolist()                         # decoded from the live RAM
 
-    # layer 1 reads only the weight rows of lit pixels: W1q[j][i] for x[i] = 1
+    # layer 1 only reads the weights of lit pixels, W1q[j][i] where x[i] = 1
     lit = np.nonzero(rec["x"])[0]
     w1 = sym["_weights"]
     assert all(act[w1 + j * 784 + i] & READ for j in (0, 31) for i in lit)
@@ -110,7 +110,7 @@ def test_inference_accesses(live):
     assert in_function(sym, "_nn_infer", prog) > 0
     assert not (act[np.arange(sym.data[0], sym.data[1])] & PROG).any()  # no code runs in data
 
-    # idle again: waiting for input, SP back in main's frame, call stack down to main
+    # idle again, waiting for input with SP back in main's frame
     assert sym.data[1] <= snap.regs["sp"] < sym.stack_top
 
 
@@ -120,7 +120,7 @@ def test_call_stack_mid_inference(live):
     src.speed = 1_000_000
     t = threading.Thread(target=z80.classify_debug, args=(records()[2]["x"],))
     t.start()
-    time.sleep(1.0)                     # 5 M T-states at 1 MHz: well inside nn_infer
+    time.sleep(1.0)                     # 1 s at 1 MHz is well inside nn_infer
     src.paused = True
     time.sleep(0.1)
     names = [n.split("+")[0] for _, n in src.capture(0).frames]
@@ -131,7 +131,7 @@ def test_call_stack_mid_inference(live):
 
 
 def test_infer_step_follows_the_network(live):
-    """What the network view shows: layer 1 neuron by neuron, then layer 2 digit by digit."""
+    """infer_step walks layer 1 neuron by neuron, then layer 2 digit by digit."""
     z80, src = live
     sym = src.symbols
     src.speed = 2_000_000              # about 2.5 s for one digit
@@ -163,13 +163,13 @@ def test_speed_holds_the_clock(live):
     t1, w1 = src.capture(0).tstates, time.monotonic()
     src.speed = 0
     mhz = (t1 - t0) / (w1 - w0) / 1e6
-    # The upper bound proves the throttle (unthrottled ticks runs at well over 100 MHz).
-    # The lower one is loose: a busy laptop can only make the emulator slower.
+    # The upper bound proves the throttle works (unthrottled ticks runs well over 100 MHz).
+    # The lower bound is loose, since a busy laptop can only slow the emulator down.
     assert 1.2 < mhz < 2.3, mhz
 
 
 def test_tstates_per_digit(live):
-    """What the panel's "This digit" count shows: about 5 M T-states, the same each time."""
+    """One inference takes about 5M T-states, and the same number every time."""
     z80, src = live
     x = records()[2]["x"]
     costs = []
@@ -182,7 +182,7 @@ def test_tstates_per_digit(live):
 
 
 def test_image_view_of_x_and_buf(live):
-    """Live, nothing touches buf after I/D: the image view shows the digit in x and in buf."""
+    """In live mode nothing touches buf after I/D, so both x and buf show the digit."""
     from z80debug import image_bytes, image_rows
 
     z80, src = live

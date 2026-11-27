@@ -14,7 +14,7 @@
 #   make ticks-viz        patched z88dk-ticks for the live debug view (build/ticks-viz)
 #   make clean            remove build output, build/ticks-viz included (artifacts/ are kept)
 
-# The project's virtual environment when there is one
+# Use the project's venv if there is one
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 ZCC    ?= zcc
 CASE   ?= 0
@@ -30,15 +30,15 @@ VIZ_TICKS  = $(VIZ)/src/ticks/z88dk-ticks
 
 .PHONY: all train check test firmware emu rom demo inputs ticks-viz clean
 
-# mlp.pt and quantized.npz are not committed: when they are missing, the
-# committed weights.bin and testvec.bin are used as they are (no retraining).
+# mlp.pt and quantized.npz are not committed. When they are missing, the
+# committed weights.bin and testvec.bin are used as is (no retraining).
 .SECONDARY: $(ART)/mlp.pt $(ART)/quantized.npz
 
 all: inputs firmware emu rom
 
 # --- Python pipeline ----------------------------------------------------------
-# Artifacts depend on each other only, not on the scripts, so editing a script
-# never starts a 10-epoch retrain by surprise. "make train" forces it.
+# Artifacts depend only on each other, not on the scripts, so editing a script
+# never triggers a retrain. Use "make train" for that.
 
 $(ART)/mlp.pt:
 	$(PYTHON) training/train.py
@@ -58,8 +58,8 @@ train:
 check: $(ART)/quantized.npz
 	$(PYTHON) training/reference.py
 
-# Builds what the tests run, so a green run does not hide skipped tests.
-# -rs lists every skipped test with its reason.
+# Builds everything the tests need, so tests are not silently skipped.
+# -rs lists skipped tests with the reason.
 test: emu rom $(ART)/weights.bin $(ART)/testvec.bin $(if $(wildcard $(TICKS_SRC)/ticks),ticks-viz)
 	$(PYTHON) -m pytest -rs tests/
 
@@ -69,7 +69,7 @@ inputs: $(ART)/weights.bin $(ART)/testvec.bin
 	$(PYTHON) tests/make_dezog_inputs.py $(CASE)
 
 # --- Z80 (z88dk) --------------------------------------------------------------
-# Always rebuilt: FW can switch the source file, and a build takes seconds.
+# Always rebuilt, since FW can change the source and a build takes seconds.
 # Output names (NAME_CODE.bin, NAME_DATA.bin, NAME.map) match .vscode/launch.json.
 
 build:
@@ -78,13 +78,13 @@ build:
 firmware: | build
 	$(ZCC) $(ZFLAGS) -o build/firmware.bin $(FW) firmware/nn.c
 
-# +test: console I/O is z88dk-ticks' stdin/stdout. No --list, so the DeZog
-# listings (firmware/*.lis) are left alone.
+# +test: console I/O goes to z88dk-ticks' stdin/stdout. No --list, so the
+# DeZog listings (firmware/*.lis) are not overwritten.
 emu: | build
 	$(ZCC) +test -compiler=sdcc -m -o build/emu.bin firmware/z80_serial_main.c firmware/nn.c firmware/snapregs.c
 
 # Board: +z80's default ROM layout (code from 0x0000, RAM from 0x8000).
-# CRT_ENABLE_EIDI=0x01: interrupts stay off, the firmware polls the ACIA.
+# CRT_ENABLE_EIDI=0x01 keeps interrupts off, the firmware polls the ACIA.
 # Write build/board.rom to the EEPROM.
 rom: | build
 	$(ZCC) +z80 -compiler=sdcc -m -pragma-define:CRT_ENABLE_EIDI=0x01 -create-app \
@@ -92,7 +92,7 @@ rom: | build
 
 # --- Patched z88dk-ticks for the live debug view -----------------------------
 # Copies z88dk's ticks source into build/, applies tools/ticks-viz.patch
-# (option -shm: memory, registers and accesses shared with host/z80debug.py)
+# (adds -shm, which shares memory, registers and accesses with host/z80debug.py)
 # and builds it there. The installed z88dk is not touched.
 
 ticks-viz: $(VIZ_TICKS)

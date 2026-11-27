@@ -2,13 +2,13 @@
 #include "nn.h"
 
 
+/* One hidden neuron before ReLU. Pixels are 0 or 1, so each lit pixel just adds its weight. */
 static int32_t layer1_neuron(const int8_t *row, int32_t bias, const uint8_t *x)
 {
-    /* value of one layer-1 neuron; called once per hidden neuron (32 times) */
     int32_t acc = bias;
 
     for (uint16_t i = 0; i < N_IN; i++){
-        if (x[i] != 0){ /* binary input: each lit pixel adds its weight */
+        if (x[i] != 0){
             acc += row[i];
         }
     }
@@ -16,16 +16,18 @@ static int32_t layer1_neuron(const int8_t *row, int32_t bias, const uint8_t *x)
     return acc;
 }
 
+/* ReLU, then scale to 0..127 with a rounded (acc * M0) >> shift. */
 static uint8_t requant(int32_t acc, int32_t M0, uint8_t shift)
 {
-    /* ReLU, then rescale acc1 to h_q with M0 and shift (rounded), then clamp to 127 */
     int32_t t;
 
     if (acc < 0){ /* ReLU */
         acc = 0;
     }
 
-    t = (acc * M0 + ((int32_t)1 << (shift - 1))) >> shift; /* acc >= 0 e acc <= bound: quantize.py garantisce acc * M0 + 2^(shift-1) < 2^31 */
+    /* No overflow: 0 <= acc <= bound, and quantize.py picks M0 and shift so that
+       bound * M0 + 2^(shift-1) < 2^31. */
+    t = (acc * M0 + ((int32_t)1 << (shift - 1))) >> shift;
 
     if (t > 127){
         return 127;
@@ -34,13 +36,13 @@ static uint8_t requant(int32_t acc, int32_t M0, uint8_t shift)
     return (uint8_t)t;
 }
 
+/* One output score (logit). */
 static int32_t layer2_neuron(const int8_t *row, int32_t bias, const uint8_t *h_q)
 {
-    /* value of one layer-2 neuron (logit) */
     int32_t acc = bias;
 
     for (uint8_t j = 0; j < N_HID; j++){
-        acc += (int16_t)row[j] * (int16_t)h_q[j]; 
+        acc += (int16_t)row[j] * (int16_t)h_q[j];
     }
 
     return acc;

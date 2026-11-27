@@ -1,10 +1,9 @@
-"""End-to-end: host/z80nn.py <-> firmware/z80_serial_main.c in z88dk-ticks.
+"""End-to-end tests: host/z80nn.py talking to firmware/z80_serial_main.c in z88dk-ticks.
 
-Every case of artifacts/testvec.bin must match bit for bit (acc1, h_q, acc2,
-digit). Runs twice:
+Every case in artifacts/testvec.bin must match exactly (acc1, h_q, acc2, digit).
+Runs on both builds, and skips the ones that are missing:
     build/emu.bin     make emu, console I/O
-    build/board.rom   make rom, the EEPROM image; ticks emulates the ACIA at 0x80/0x81
-A build that is missing is skipped. Run with: pytest tests/test_emu.py
+    build/board.rom   make rom, the EEPROM image (ticks emulates the ACIA at 0x80/0x81)
 """
 
 import os
@@ -32,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 
 
 def read_map(path):
-    """{name: address} of the C symbols in a z88dk .map file, plus code_compiler names."""
+    """C symbols of a z88dk .map file: ({name: address}, {function name: address})."""
     syms, code = {}, {}
     for line in open(path):
         m = re.match(r"(_\w+)\s+= \$([0-9A-F]{4}) ; (\w+),.*?, (\w+), [^,]*$", line.rstrip())
@@ -47,7 +46,7 @@ def read_map(path):
 
 
 def function_at(code, addr):
-    """Name of the C function whose code contains addr (the closest symbol below it)."""
+    """The C function containing addr (the closest symbol below it)."""
     return max((a, name) for name, a in code.items() if a <= addr)[1]
 
 
@@ -98,14 +97,14 @@ def test_registers_after_inference(z80):
     regs = z80.registers()
     assert set(regs) == {"af", "bc", "de", "hl", "ix", "iy", "sp", "pc",
                          "af2", "bc2", "de2", "hl2", "i", "r"}
-    assert function_at(code, regs["pc"]) == "_cmd_infer"       # snapped right after nn_infer
-    top = syms["__register_sp"] or 0x10000                     # board: 0 = wraps to 0xFFFF
+    assert function_at(code, regs["pc"]) == "_cmd_infer"       # saved right after nn_infer
+    top = syms["__register_sp"] or 0x10000                     # board: SP = 0 wraps to 0xFFFF
     highest_var = max(syms[n] for n in ("_weights", "_x", "_trace", "_line", "_buf", "_regs",
                                         "_stack_copy"))
     assert highest_var < regs["sp"] < top
 
-    # stack_copy = the stack at the snapshot. cmd_infer's frame: IX -> saved IX, then the
-    # return address into main.
+    # stack_copy is the stack at the snapshot. In cmd_infer's frame, IX points at the
+    # saved IX, followed by the return address into main.
     stack = z80.read_memory(syms["_stack_copy"], 256)
     k = regs["ix"] - regs["sp"]
     assert 0 <= k < 254
@@ -121,7 +120,7 @@ def test_memory_reads(z80):
 
     x = read_test_vectors(TESTVEC)[3]["x"]
     z80.classify(x)
-    assert z80.read_memory(syms["_x"], 784) == bytes(x.tolist())  # unpacked, one byte per pixel
+    assert z80.read_memory(syms["_x"], 784) == bytes(x.tolist())  # one byte per pixel
 
     assert z80.read_memory(syms["_weights"], 1) == payload[:1]     # smallest read
     wrap = z80.read_memory(0xFFF0, 32)                             # wraps at 0xFFFF
