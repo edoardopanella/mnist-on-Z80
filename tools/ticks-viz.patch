@@ -10,6 +10,37 @@ diff -ruN a/src/ticks/Makefile b/src/ticks/Makefile
  	../common/dirname.o $(UNIXem_OBJS)
  GDBOBJS = cpu.o backend.o syms.o disassembler_alg.o debug.o exp_engine.o debugger.o breakpoints.o profiler.o debugger_gdb.o debugger_mi2.o debugger_gdb_packets.o linenoise.o srcfile.o ../common/dirname.o sxmlc.o sxmlsearch.o $(UNIXem_OBJS)
  DISOBJS = disassembler_main.o syms.o disassembler_alg.o debug.o exp_engine.o backend.o
+diff -ruN a/src/ticks/acia.c b/src/ticks/acia.c
+--- a/src/ticks/acia.c	2026-11-27 18:24:49
++++ b/src/ticks/acia.c	2026-11-27 18:24:49
+@@ -1,7 +1,9 @@
+ // Simple ACIA emulator
+ 
+ #include <stdio.h>
++#include <stdlib.h>
+ #include "ticks.h"
++#include "viz.h"
+ 
+ 
+ 
+@@ -22,10 +24,15 @@
+ 
+ int acia_in(int port) {
+     if ( (port & 0xff) == 0x80 ) {  // Status
++        // kbhit() returns -1, not 0, when nothing is waiting, so RX full is always
++        // set and a polling loop goes on to the data read, which blocks in getch().
+         int have_key = kbhit();
+         return (have_key ? SER_RDRF : 0 ) | SER_TDRE;
+     } else  if ( (port & 0xff) == 0x81 ) {  // Read data
+-        return getch();
++        int val = getch();      // blocks; with -shm it publishes first (hook_console.c)
++        if (val == EOF && viz)
++            exit(EXIT_SUCCESS); // end of input: the firmware cannot tell, so ticks stops
++        return val;
+     }
+     return -1;
+ }
+\ No newline at end of file
 diff -ruN a/src/ticks/hook_console.c b/src/ticks/hook_console.c
 --- a/src/ticks/hook_console.c	2026-11-24 12:54:07
 +++ b/src/ticks/hook_console.c	2026-11-24 12:53:36

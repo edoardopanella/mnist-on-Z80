@@ -8,7 +8,7 @@
 #   make firmware FW=firmware/z80_test_main.c    toolchain sanity check instead
 #   make emu              build/emu.bin     (z80_serial_main.c for z88dk-ticks)
 #   make rom              build/board.rom   (z80_serial_main.c for the board's EEPROM)
-#   make demo             drawing app classifying on the emulator
+#   make demo             drawing app classifying on the emulator, running build/board.rom
 #   make demo PORT=/dev/tty.usbserial-XXXX      same, on the board (DEBUG=1: debug panel)
 #   make inputs CASE=n    build/weights_payload.bin + build/case.bin for DeZog (default 0)
 #   make ticks-viz        patched z88dk-ticks for the live debug view (build/ticks-viz)
@@ -112,7 +112,8 @@ ifdef PORT
 demo: $(ART)/weights.bin
 	$(PYTHON) host/demo.py board $(PORT) $(if $(DEBUG),--debug)
 else
-demo: emu $(ART)/weights.bin
+# The emulator runs the EEPROM image itself (ticks emulates the board's ACIA)
+demo: rom $(ART)/weights.bin
 	$(PYTHON) host/demo.py
 endif
 

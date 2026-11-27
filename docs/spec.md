@@ -403,7 +403,7 @@ The firmware is an endless loop: read one line, execute the command, reply with 
 - Commands are ASCII lines terminated by `\n`. A `\r` before it is ignored.
 - Bytes are encoded as **two hexadecimal digits** (`00`..`FF`); upper and lower case are both accepted on input, the board replies in upper case.
 - The receive buffer holds 198 characters, the longest valid line (`I ` + 196 hex digits). A longer line is discarded and answered with `ERR LONG`.
-- At end of input (the emulator's stdin closed) `build/emu.bin` exits. The board, and `build/board.rom` in the emulator, keep polling.
+- At end of input (the emulator's stdin closed) `build/emu.bin` exits. The board keeps polling, and so does `build/board.rom` in plain `z88dk-ticks`, which then gives it `0xFF` bytes forever; with `-shm` the patched ticks exits instead (§7.7).
 
 **Commands**:
 
@@ -441,7 +441,7 @@ The firmware is an endless loop: read one line, execute the command, reply with 
 | `board` | serial port | 115,200 baud, 8N1, RTS/CTS, 5 s timeout (`pyserial`) |
 | `local` | a program on the laptop | Its stdin/stdout |
 
-`close()` closes the input; a program that does not exit within 2 s (`board.rom` polls forever) is killed.
+`close()` closes the input; a program that does not exit within 2 s is killed. That happens to `board.rom` in plain ticks, which never sees the end of input (§7.5); with `-shm` ticks exits at once.
 
 **Makefile targets**:
 
@@ -455,7 +455,7 @@ The firmware is an endless loop: read one line, execute the command, reply with 
 | `make firmware` | `build/firmware_*` for DeZog; `FW=` picks another source |
 | `make inputs CASE=n` | `build/weights_payload.bin` and `build/case.bin` for DeZog |
 | `make ticks-viz` | The patched emulator in `build/ticks-viz` (§7.7) |
-| `make demo` | The drawing demo on the emulator; `PORT=…` on the board, `DEBUG=1` with the debug panel there |
+| `make demo` | Builds `rom` and runs the drawing demo on the emulator with `build/board.rom` (`host/demo.py`'s default, map `build/board.map`); `PORT=…` on the board, `DEBUG=1` with the debug panel there |
 | `make clean` | Removes `build/` (including `build/ticks-viz`) and the listings; `artifacts/` stay |
 
 `PYTHON` defaults to `.venv/bin/python` when that exists, else `python`. Recipe lines start with a **TAB**.
@@ -489,12 +489,15 @@ Symbols and memory-map blocks come from the program's `.map` file (`MapSymbols`)
 Rules:
 
 - ticks publishes the registers about 100 times per emulated second (every 200,000 T-states at full speed), only between instructions, and once more before it blocks waiting for input. A reader takes a value only when `seq` is even and the same before and after reading.
+- Blocking reads: `emu.bin` reads the console (`cmd_readkey()`, which calls `getchar()`); `board.rom` reads the ACIA data register (`acia_in()`, port `0x81`, which calls `getch()`). Both publish first (`viz_idle()`) and then block in the C library until a byte arrives, so the T-states stop and the panel shows `idle`. Pause and clock changes made while blocked take effect at the next publish after the read returns.
+- **Dependency on z88dk's ACIA emulation.** `board.rom` waits in the data read only because the status read (port `0x80`) never reports "empty": it tests `kbhit()` for truth, and `kbhit()` returns −1, not 0, when no byte is waiting, whatever stdin is. So RX full is always set and `ser_getc()`'s polling loop never repeats. This is undocumented behaviour of the installed z88dk. If a later z88dk reports "empty" correctly, the firmware spins on the status register, using a full core and counting T-states while idle, and never reaches the data read, so the end-of-input exit below stops working too. `test_board_rom_waits_without_running` in `tests/test_ticks_viz.py` is the guard: it fails when the T-states move while `board.rom` waits for a command, so a z88dk upgrade fails loudly instead of quietly burning a core.
+- End of input: when the ACIA data read gets `EOF` (the host closed stdin), the patched ticks with `-shm` exits with status 0. The firmware cannot tell end of input from data (plain ticks returns `0xFF`), so without this the program would never end. `emu.bin` needs no help: its console read returns −1 and the firmware returns from `main`.
 - At `speed_hz` > 0 ticks sleeps to keep the emulated clock; time spent paused or waiting for input is not caught up.
 - Access bits are set in `get_memory()` (read or prog, by the access type) and `put_memory()` (write); loading the program sets none. A write to write-protected memory still counts as a write.
 - Only the standard 64 KB memory model maps its RAM into the file.
 - Without `-shm`, the patched ticks behaves exactly like the original.
 
-The patch (`tools/ticks-viz.patch`) adds `viz.h`/`viz.c` and hooks in `memory.c`, `ticks.c` (the CPU loop), `ticks_main.c` (the option), `hook_console.c` (before blocking reads) and the `Makefile`. `make ticks-viz` applies it to a copy of the installed z88dk's `src/ticks` in `build/ticks-viz`; the installed z88dk is not changed.
+The patch (`tools/ticks-viz.patch`) adds `viz.h`/`viz.c` and hooks in `memory.c`, `ticks.c` (the CPU loop), `ticks_main.c` (the option), `hook_console.c` (before blocking reads), `acia.c` (exit at end of input) and the `Makefile`. `make ticks-viz` applies it to a copy of the installed z88dk's `src/ticks` in `build/ticks-viz`; the installed z88dk is not changed.
 
 ---
 

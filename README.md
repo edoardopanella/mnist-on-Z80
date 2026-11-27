@@ -64,8 +64,8 @@ Test-set results: float 96.01%, integer 95.96%, float/integer agreement 99.67%.
 The drawing window runs on the laptop; the network runs on the Z80. They exchange text lines. The firmware, the bridge and the protocol are the same whether the Z80 is emulated or real; only the way characters travel changes.
 
 ```
-host/draw.py ─► host/demo.py ─► host/z80nn.py ─┬─ emu ──► z88dk-ticks running build/emu.bin    (console)
-  drawing         glue           Z80NN bridge  │          z88dk-ticks running build/board.rom  (emulated ACIA)
+host/draw.py ─► host/demo.py ─► host/z80nn.py ─┬─ emu ──► z88dk-ticks running build/board.rom  (emulated ACIA, the demo's default)
+  drawing         glue           Z80NN bridge  │          z88dk-ticks running build/emu.bin    (console)
   window                                       └─ board ─► USB serial ─► ACIA ─► build/board.rom on the EEPROM
 ```
 
@@ -108,7 +108,11 @@ Board memory map: code in ROM from `0x0000` (about 3.9 KB); weights, buffers and
 
 ### Testing the EEPROM image before writing it
 
-`z88dk-ticks` already emulates an ACIA on the same ports as the board, but it never flushes its output, so replies sent through a pipe never arrive. `Z80NN` therefore gives ticks a pseudo-terminal as stdout: on a terminal the C library flushes at every `\n`. With it, the exact `build/board.rom` that goes on the EEPROM runs in the emulator. `tests/test_emu.py` runs all 105 test vectors on both builds and checks every intermediate value.
+`z88dk-ticks` already emulates an ACIA on the same ports as the board, but it never flushes its output, so replies sent through a pipe never arrive. `Z80NN` therefore gives ticks a pseudo-terminal as stdout: on a terminal the C library flushes at every `\n`. With it, the exact `build/board.rom` that goes on the EEPROM runs in the emulator, and the demo runs that image by default. `tests/test_emu.py` runs all 105 test vectors on both builds and checks every intermediate value.
+
+While the firmware waits for a command, ticks waits too, using no CPU, although `ser_getc()` polls the ACIA's status register. This relies on a quirk of the installed z88dk: its status read reports a received byte even when none is waiting (`kbhit()` returns −1, not 0, and the emulation takes that as true), so the firmware goes straight to reading the data register, and that read blocks until a byte arrives. A z88dk that reports "empty" correctly would make the firmware spin, using a full core; `tests/test_ticks_viz.py` fails if that happens (`docs/spec.md` §7.7).
+
+At end of input (the laptop closed ticks' stdin) the firmware cannot tell: plain ticks gives it `0xFF` bytes forever, so `Z80NN.close()` kills it after 2 s. The patched ticks of the live view (`-shm`, section 4) exits by itself instead.
 
 ## 4. Running the demo
 
@@ -123,9 +127,11 @@ make demo
 This is the same as:
 
 ```
-make emu                  # -> build/emu.bin
-python host/demo.py       # target emu, program build/emu.bin
+make rom                  # -> build/board.rom
+python host/demo.py       # target emu, program build/board.rom
 ```
+
+The emulator runs the same `build/board.rom` that goes on the EEPROM. To run the console build instead: `make emu`, then `python host/demo.py emu build/emu.bin`.
 
 ### On the board
 
@@ -157,14 +163,14 @@ python host/demo.py [TARGET] [WHERE] [--debug | --no-debug] [--map FILE] [--live
 
 | `TARGET` | `WHERE` | Example |
 | --- | --- | --- |
-| `emu` (default) | Z80 program for the emulator, default `build/emu.bin` | `python host/demo.py` |
+| `emu` (default) | Z80 program for the emulator, default `build/board.rom` | `python host/demo.py`, `python host/demo.py emu build/emu.bin` |
 | `board` | Serial port of the board (required) | `python host/demo.py board /dev/tty.usbserial-XXXX` |
 | `local` | Program on the laptop that speaks the protocol | `python host/demo.py local ./my_program` |
 
 | Option | Meaning |
 | --- | --- |
 | `--debug` / `--no-debug` | Show or hide the debug panel. Default: shown on `emu`, hidden on `board` and `local` (`local` cannot have it). |
-| `--map FILE` | The `.map` file of the program that runs, for the symbols. Default: next to the emulator program (`build/emu.map`), or `build/board.map` for the board. It must come from the same build as the EEPROM contents. |
+| `--map FILE` | The `.map` file of the program that runs, for the symbols. Default: next to the emulator program (`build/board.map` for `build/board.rom`, `build/emu.map` for `build/emu.bin`), or `build/board.map` for the board. It must come from the same build as the EEPROM contents. |
 | `--live` / `--no-live` | Emulator: live debug view with the patched ticks. Default: on when `make ticks-viz` has been run. |
 | `--speed MHZ` | Live view: the emulated clock, default `1` (one inference takes about 5 s to watch); `0` = as fast as possible. Changeable in the panel. |
 
@@ -214,9 +220,9 @@ With the panel, the window has a DeZog-style view on the right. Images go with `
 | Memory | A window anywhere in the 64 KB. **Go to** a variable, SP or PC, or type an **Address** (hex, Enter); scroll with the wheel, PgUp/PgDn or the scroll bar (the bar is the whole 64 KB). Only the rows shown are read, so it works on the board too. **View**: *Hex*, 16 × 16 bytes and ASCII, each byte coloured by its access; or *Image 28×28*, 28 pixels per row like the MNIST frame, with a thin ring in the access colour. **Pixel** *1 byte* shows `x` (0/1: white = 1); other bytes are drawn as signed, + orange and − blue, so at `weights` each 28×28 is one hidden neuron's `W1q` row (PgDn: the next neuron). *1 bit* shows `buf`, the packed image the laptop sent. Go to picks the right one for `x` and `buf`. It opens on `x` as an image. Hover the image for the address (at `weights`: which neuron and pixel the weight belongs to). In snapshot mode the first 3 bytes of `buf` hold the arguments of the panel's own last `M` command. **Refresh** reads it again. |
 | Clock (live only) | The emulated clock: 100 kHz, 1 MHz, 3.5 MHz, 7.37 MHz (the board's), or max; **Pause** stops the Z80 between two instructions. Under it, the T-states of the current digit (from 0 at each Recognize), what they would take on the board, and the measured MHz (`idle` while the Z80 waits). A digit in the panel costs more than 5 million T-states: `D` also decodes the image and sends back every intermediate value. |
 
-**Live mode.** `make ticks-viz` copies z88dk's `src/ticks` into `build/ticks-viz`, applies `tools/ticks-viz.patch` and builds it there; the installed z88dk is not changed. The patch adds one option, `-shm <file>`: ticks keeps the emulated RAM in that file and marks there every access (bits read, write, prog, set in `get_memory()`/`put_memory()`), and publishes the registers and T-states about 100 times per emulated second. It also sleeps to match the clock the panel asks for, and waits while paused. `LiveSource` (`host/z80debug.py`) maps the same file; the panel shows the accesses fading out in about half a second, like DeZog. Without `-shm` the patched ticks behaves like the original. The weights always go up at full speed; the clock applies from the first digit. The patch is made for the z88dk sources installed here: if a newer z88dk no longer accepts it, `make ticks-viz` fails and the demo falls back to snapshots.
+**Live mode.** `make ticks-viz` copies z88dk's `src/ticks` into `build/ticks-viz`, applies `tools/ticks-viz.patch` and builds it there; the installed z88dk is not changed. The patch adds one option, `-shm <file>`: ticks keeps the emulated RAM in that file and marks there every access (bits read, write, prog, set in `get_memory()`/`put_memory()`), and publishes the registers and T-states about 100 times per emulated second. It also sleeps to match the clock the panel asks for, waits while paused, and exits at end of input when it runs `build/board.rom` (section 3). `LiveSource` (`host/z80debug.py`) maps the same file; the panel shows the accesses fading out in about half a second, like DeZog. Without `-shm` the patched ticks behaves like the original. The weights always go up at full speed; the clock applies from the first digit. The patch is made for the z88dk sources installed here: if a newer z88dk no longer accepts it, `make ticks-viz` fails and the demo falls back to snapshots.
 
-**The ticks patch.** `tools/ticks-viz.patch` adds `viz.h` and `viz.c` to `src/ticks`, and short hooks to `memory.c` (access bits), `ticks.c` (publishing, clock and pause in the CPU loop), `ticks_main.c` (the `-shm` option), `hook_console.c` (publishing before a blocking read) and its `Makefile`. The shared file is 131,136 bytes: a 64-byte header (magic, a sequence counter, clock, pause, T-states, registers), the 64 KB of RAM, then 64 KB of access bits. Its exact layout and rules are in `docs/spec.md` §7.7.
+**The ticks patch.** `tools/ticks-viz.patch` adds `viz.h` and `viz.c` to `src/ticks`, and short hooks to `memory.c` (access bits), `ticks.c` (publishing, clock and pause in the CPU loop), `ticks_main.c` (the `-shm` option), `hook_console.c` (publishing before a blocking read, the console's and the ACIA's), `acia.c` (exit when the ACIA's data read finds the end of input) and its `Makefile`. The shared file is 131,136 bytes: a 64-byte header (magic, a sequence counter, clock, pause, T-states, registers), the 64 KB of RAM, then 64 KB of access bits. Its exact layout and rules are in `docs/spec.md` §7.7.
 
 **Snapshot mode.** Snapshots are: registers and stack as they were when `nn_infer` returned (the firmware copies the stack into `stack_copy`, because `G` and `M` reuse that area), memory as it is when read. The firmware cannot see its own bus, so the bar shows only writes, as the bytes that changed since the previous snapshot (variables, stack and memory window; the weights are not compared). On the board one refresh moves about 2 KB over the serial line, a fraction of a second.
 
@@ -259,5 +265,5 @@ make check    # integer reference vs float model
 | --- | --- |
 | `tests/test_preprocess.py` | The drawing preprocessing: empty input, bounding box, 20 px scaling, centering. |
 | `tests/test_z80debug.py` | The map parser on both builds (sizes, symbols, memory-map blocks, board layout), flag decoding, snapshots on both builds (scores, call stack, changed bytes), the order and errors of `draw.Worker`, the image decoding of `x` (bytes) and `buf` (bits) after a real inference, `infer_step()` on both maps, the panel's memory scrolling (wheel, pages, bar, wrap at `FFFF`), image view (and a neuron's weights), focus on hover (veils, gaps, outside the window, off) and the stack keeping its place, and Stop in `DrawingApp` (answer dropped, the next drawing run after it). |
-| `tests/test_ticks_viz.py` | The patched ticks, on both builds: all 105 test vectors with `-shm`; the upload seen as writes by `cmd_write`; layer 1 reading exactly the weight rows of lit pixels; no instruction fetched from data; the call stack down to `main` in the middle of an inference; `infer_step()` following layer 1 neuron by neuron, then layer 2; `x` and `buf` as images; the per-digit T-states; the clock (2 MHz asked, at most 2.3 measured, so it is throttled) and Pause. Skipped without `make ticks-viz`. |
+| `tests/test_ticks_viz.py` | The patched ticks, on both builds: all 105 test vectors with `-shm`; the upload seen as writes by `cmd_write`; layer 1 reading exactly the weight rows of lit pixels; no instruction fetched from data; the call stack down to `main` in the middle of an inference; `infer_step()` following layer 1 neuron by neuron, then layer 2; `x` and `buf` as images; the per-digit T-states; the clock (2 MHz asked, at most 2.3 measured, so it is throttled) and Pause; `build/board.rom` waiting for a command with no T-states and no accesses (the guard for the ACIA quirk, section 3), the panel's clock saying `idle` then, and ticks exiting with status 0 within 1 s of the end of input. Skipped without `make ticks-viz`. |
 | `tests/test_emu.py` | All 105 test vectors through `Z80NN` on the emulated Z80, for both `build/emu.bin` and `build/board.rom`: every `acc1`, `h_q`, `acc2` and digit must match Python. Also checks the register snapshot (`G`: PC inside `cmd_infer`, SP in the stack) and memory reads (`M`: the weights and the unpacked image), and that errors leave the firmware running. A build that is missing is skipped (`make emu rom`). |

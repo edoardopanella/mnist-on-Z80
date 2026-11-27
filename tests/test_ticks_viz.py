@@ -3,6 +3,8 @@
     - with -shm, all 105 test vectors still match on both builds
     - the shared file shows RAM, registers and real accesses
     - speed throttles the emulated clock and Pause stops it
+    - board.rom waiting for a command blocks (no T-states, panel says idle),
+      and ticks exits when the input ends
     - without -shm the patched ticks behaves as before
 
 Skipped if build/ticks-viz is not built.
@@ -215,6 +217,71 @@ def test_pause_stops_between_instructions(live):
     src.speed = 0
     t.join(timeout=30)
     assert result["digit"] == rec["digit"]
+
+
+# --- board.rom waiting for input -------------------------------------------------
+# z88dk's ACIA status read reports a received byte even when none is waiting
+# (kbhit() returns -1, which is true), so the firmware's polling loop goes on to
+# the data read, which blocks in getch() and publishes first. A z88dk whose
+# status read says "empty" would make the firmware spin instead, using a full
+# core: test_board_rom_waits_without_running is the guard (docs/spec.md §7.7).
+
+@pytest.fixture
+def board_rom():
+    """A fresh build/board.rom in the patched ticks with -shm, waiting for a command."""
+    prog, map_path = (os.path.join(ROOT, p) for p in BUILDS["board-rom"])
+    if not os.path.exists(prog):
+        pytest.skip("build/board.rom not built")
+    tmp = tempfile.mkdtemp(prefix="z80viz-test-")
+    shm = os.path.join(tmp, "ticks.shm")
+    z80 = Z80NN("emu", prog, ticks=VIZ_TICKS, shm=shm)
+    assert z80.version() == "Z80NN 2"
+    source = LiveSource(shm, MapSymbols(map_path))
+    source.idle_tstates()               # the reply can arrive before ticks blocks
+    yield z80, source
+    z80.close()
+    source.close()
+    shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_board_rom_waits_without_running(board_rom):
+    """Guard: waiting for a command, ticks blocks instead of running the ACIA polling loop."""
+    z80, src = board_rom
+    first = src.capture(0)
+    time.sleep(1.2)
+    second = src.capture(0)
+    assert second.tstates == first.tstates, "the firmware spins on the ACIA status register"
+    assert not second.activity.any()                                 # no accesses either
+    assert in_function(src.symbols, "_ser_getc", [second.regs["pc"]]) == 1
+
+
+def test_panel_shows_idle_while_waiting(board_rom):
+    import tkinter as tk
+    from debug_panel import DebugPanel
+
+    z80, src = board_rom
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    root.withdraw()
+    try:
+        panel = DebugPanel(root, src.symbols, src.capture, lambda fn, done: done(fn(), None), live=src)
+        panel.pack()
+        panel.refresh()                 # starts the rate measurement
+        time.sleep(0.5)                 # the panel measures over more than 0.4 s
+        panel.refresh()
+        text = panel.clock.cget("text")
+        assert text.endswith(" · idle"), text
+    finally:
+        root.destroy()
+
+
+def test_board_rom_exits_at_end_of_input(board_rom):
+    """The firmware cannot see the end of input, so with -shm ticks exits by itself."""
+    z80, _ = board_rom
+    z80.proc.stdin.close()
+    assert z80.proc.wait(timeout=1) == 0
 
 
 def test_without_shm_it_is_plain_ticks():

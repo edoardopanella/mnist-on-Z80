@@ -1,7 +1,8 @@
 """
 demo.py - Draw a digit and let the Z80 classify it.
 
-    python host/demo.py                          emulator: build/emu.bin in z88dk-ticks (make emu)
+    python host/demo.py                          emulator: build/board.rom in z88dk-ticks (make rom)
+    python host/demo.py emu build/emu.bin        emulator: the console build (make emu)
     python host/demo.py board /dev/tty.usbserial-XXXX    the board, over serial
     python host/demo.py board /dev/tty.usbserial-XXXX --debug    the board, with the debug panel
 
@@ -28,7 +29,7 @@ from z80nn import Z80NN
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WEIGHTS = os.path.join(ROOT, "artifacts", "weights.bin")
-EMU_BIN = os.path.join(ROOT, "build", "emu.bin")
+BOARD_ROM = os.path.join(ROOT, "build", "board.rom")
 BOARD_MAP = os.path.join(ROOT, "build", "board.map")
 VIZ_TICKS = os.path.join(ROOT, "build", "ticks-viz", "src", "ticks", "z88dk-ticks")
 
@@ -36,12 +37,12 @@ VIZ_TICKS = os.path.join(ROOT, "build", "ticks-viz", "src", "ticks", "z88dk-tick
 def main():
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0].strip())
     parser.add_argument("target", nargs="?", default="emu", choices=["emu", "board", "local"])
-    parser.add_argument("where", nargs="?", default=EMU_BIN,
-                        help="emu/local: program to run (default build/emu.bin); board: serial port")
+    parser.add_argument("where", nargs="?", default=BOARD_ROM,
+                        help="emu/local: program to run (default build/board.rom); board: serial port")
     parser.add_argument("--debug", action=argparse.BooleanOptionalAction, default=None,
                         help="show the debug panel (default: on for emu, off for board and local)")
-    parser.add_argument("--map", help="the program's .map file (default: next to the emu program; "
-                                      "build/board.map for the board)")
+    parser.add_argument("--map", help="the program's .map file (default: next to the emu program, "
+                                      "build/board.map for build/board.rom; build/board.map for the board)")
     parser.add_argument("--live", action=argparse.BooleanOptionalAction, default=None,
                         help="emu: live debug view (default: on when build/ticks-viz exists)")
     parser.add_argument("--speed", type=float, default=1.0,

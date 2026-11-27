@@ -150,11 +150,11 @@ class Z80NN:
             self.port.close()
 
         else:
-            self.proc.stdin.close()     # emu.bin exits at end of input,
-            try:
+            self.proc.stdin.close()     # emu.bin exits at end of input, and so does
+            try:                        # ticks with -shm running board.rom
                 self.proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                self.proc.kill()        # board.rom polls the ACIA forever, like the board
+                self.proc.kill()        # plain ticks: board.rom polls the ACIA forever, like the board
                 self.proc.wait()
             if self.target == "emu":
                 self.out.close()
