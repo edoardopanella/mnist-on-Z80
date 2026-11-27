@@ -175,7 +175,8 @@ class DrawingApp(tk.Tk):
                 if widget is not None and hasattr(widget, "focus_parts"):
                     parts += widget.focus_parts()
             self.hover_focus = HoverFocus(self, parts)
-            self.focus_on = tk.BooleanVar(value=True)
+            self.hover_focus.set_enabled(False)          # off by default
+            self.focus_on = tk.BooleanVar(value=False)
             tk.Checkbutton(self.buttons, text="Focus on hover", variable=self.focus_on,
                            command=lambda: self.hover_focus.set_enabled(self.focus_on.get())).pack(
                 side=tk.LEFT, padx=(15, 5))
