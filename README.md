@@ -1,6 +1,8 @@
 # MNIST on Z80
 
-Handwritten digit recognition on a Z80. A 784 → 32 → 10 MLP is trained in floating point with PyTorch, converted to integer-only arithmetic, and run in C on the Z80. You draw a digit on the laptop, and the Z80 classifies it, either in the `z88dk-ticks` emulator or on Grant Searle's breadboard Z80. The C code reproduces the Python integer reference bit for bit.
+Handwritten digit recognition on a Z80. A 784 → 32 → 10 MLP is trained in floating point with PyTorch, converted to integer-only arithmetic, and run in C on the Z80. You draw a digit on the laptop, and the Z80 classifies it, in the `z88dk-ticks` emulator. The same firmware is built as an EEPROM image for Grant Searle's breadboard Z80; that exact image passes all tests in the emulator, but it has not yet been run on the physical board. The C code reproduces the Python integer reference bit for bit.
+
+Federico Scaffidi Muta, Edoardo Panella. Software Engineering (20875) project, Bocconi University, Fall 2026.
 
 ## Layout
 
@@ -8,17 +10,16 @@ Handwritten digit recognition on a Z80. A 784 → 32 → 10 MLP is trained in fl
 training/   Python pipeline: train → quantize → check → export
 firmware/   C inference library and Z80 programs
 host/       laptop tools: drawing app, Z80 link library, demo, network view, debug panel
-            (host/ui_v1/: backup of the first UI)
 tests/      pytest tests and DeZog input generator
 tools/      ticks-viz.patch: z88dk-ticks with a live view for the debug panel
 docs/       spec.md (formats and algorithm), plan.md, toolchain guide
-artifacts/  generated files (MNIST data, weights, test vectors), not committed
+artifacts/  weights.bin and testvec.bin (committed); MNIST data, mlp.pt, quantized.npz (generated, not committed)
 ```
 
 ## Quick start
 
 ```
-make             # trains if artifacts/ is missing, then builds every Z80 program
+make             # builds every Z80 program with the committed weights (trains only if weights.bin is missing)
 make ticks-viz   # once: the patched emulator for the live debug view (section 4)
 make test        # all tests, including the 105 test vectors on the emulated Z80
 make demo        # draw a digit, the emulated Z80 classifies it
@@ -26,7 +27,7 @@ make demo        # draw a digit, the emulated Z80 classifies it
 
 `make clean` removes `build/`, `build/ticks-viz` included: run `make ticks-viz` again after it. The Makefile uses `.venv/bin/python` when there is a `.venv`; set `PYTHON=` to use another interpreter.
 
-Requirements: Python 3 with `torch`, `torchvision`, `numpy`, `pillow`, `pytest` (and `pyserial` for the board). Also z88dk (`zcc`, `z88dk-ticks`) on `PATH`, and VS Code with DeZog for step-by-step debugging. The live debug view (`make ticks-viz`) also needs z88dk's sources (`src/` next to its `bin/`), a C compiler and `patch` (Xcode command-line tools). Installation: `docs/z80-toolchain-macos-guide.md`.
+Requirements: Python 3 with `numpy` and `pillow` for the demo (and `pyserial` for the board); `torch`, `torchvision` and `pytest` for training and the tests (the tests read `testvec.bin` through `training/export.py`). Also z88dk (`zcc`, `z88dk-ticks`) on `PATH`, and VS Code with DeZog for step-by-step debugging. The live debug view (`make ticks-viz`) also needs z88dk's sources (`src/` next to its `bin/`), a C compiler and `patch` (Xcode command-line tools). Installation: `docs/z80-toolchain-macos-guide.md`.
 
 ## 1. Training pipeline
 
@@ -111,7 +112,7 @@ Board memory map: code in ROM from `0x0000` (about 3.9 KB); weights, buffers and
 
 ## 4. Running the demo
 
-Run everything from the repository root. You need `artifacts/weights.bin`; `make` creates it if it is missing.
+Run everything from the repository root. The demo uses the committed `artifacts/weights.bin`; `make` trains again only if it is missing.
 
 ### On the emulator
 
@@ -243,7 +244,6 @@ Start the "Z80 zsim" config in VS Code. It stops at the first instruction; set b
 | `host/focus.py` | `HoverFocus`: the part under the mouse in focus, the others faded (section 4). |
 | `host/network_view.py` | `NetworkView`, the network under the drawing: hidden neurons and scores, step by step (section 4). |
 | `host/debug_panel.py` | `DebugPanel`, the Tk view of a `Snapshot` (section 4). |
-| `host/ui_v1/` | Backup of the first UI (`draw.py`, `debug_panel.py`, `demo.py`), before the network view and the captions. `python host/ui_v1/demo.py` runs it, same arguments as `host/demo.py`. |
 | `tools/ticks-viz.patch` | The live-view patch for `z88dk-ticks`, built by `make ticks-viz` (section 4). |
 
 ## Tests

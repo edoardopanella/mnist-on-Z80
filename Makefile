@@ -30,6 +30,10 @@ VIZ_TICKS  = $(VIZ)/src/ticks/z88dk-ticks
 
 .PHONY: all train check test firmware emu rom demo inputs ticks-viz clean
 
+# mlp.pt and quantized.npz are not committed: when they are missing, the
+# committed weights.bin and testvec.bin are used as they are (no retraining).
+.SECONDARY: $(ART)/mlp.pt $(ART)/quantized.npz
+
 all: inputs firmware emu rom
 
 # --- Python pipeline ----------------------------------------------------------
