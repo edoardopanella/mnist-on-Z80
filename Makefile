@@ -5,7 +5,7 @@
 #   make check            integer reference vs float model (accuracies)
 #   make test             builds emu, rom (and ticks-viz if z88dk's sources are there), then pytest
 #   make firmware         build/firmware_*  (z80_nn_main.c, launch config "Z80 zsim")
-#   make firmware FW=firmware/z80_test_main.c    toolchain sanity check instead
+#   make firmware FW=src/firmware/z80_test_main.c    toolchain sanity check instead
 #   make emu              build/emu.bin     (z80_serial_main.c for z88dk-ticks)
 #   make rom              build/board.rom   (z80_serial_main.c for the board's EEPROM)
 #   make demo             drawing app classifying on the emulator, running build/board.rom
@@ -18,7 +18,7 @@
 PYTHON ?= $(if $(wildcard .venv/bin/python),.venv/bin/python,python)
 ZCC    ?= zcc
 CASE   ?= 0
-FW     ?= firmware/z80_nn_main.c
+FW     ?= src/firmware/z80_nn_main.c
 ZFLAGS  = +z80 -compiler=sdcc -m --list --c-code-in-asm -pragma-define:CRT_MODEL=0
 
 ART = artifacts
@@ -41,22 +41,22 @@ all: inputs firmware emu rom
 # never triggers a retrain. Use "make train" for that.
 
 $(ART)/mlp.pt:
-	$(PYTHON) training/train.py
+	$(PYTHON) src/training/train.py
 
 $(ART)/quantized.npz: $(ART)/mlp.pt
-	$(PYTHON) training/quantize.py
+	$(PYTHON) src/training/quantize.py
 
 # Pattern rule with two targets: one run of export.py writes both files.
 %/weights.bin %/testvec.bin: %/quantized.npz
-	$(PYTHON) training/export.py
+	$(PYTHON) src/training/export.py
 
 train:
-	$(PYTHON) training/train.py
-	$(PYTHON) training/quantize.py
-	$(PYTHON) training/export.py
+	$(PYTHON) src/training/train.py
+	$(PYTHON) src/training/quantize.py
+	$(PYTHON) src/training/export.py
 
 check: $(ART)/quantized.npz
-	$(PYTHON) training/reference.py
+	$(PYTHON) src/training/reference.py
 
 # Builds everything the tests need, so tests are not silently skipped.
 # -rs lists skipped tests with the reason.
@@ -76,46 +76,46 @@ build:
 	mkdir -p build
 
 firmware: | build
-	$(ZCC) $(ZFLAGS) -o build/firmware.bin $(FW) firmware/nn.c
+	$(ZCC) $(ZFLAGS) -o build/firmware.bin $(FW) src/firmware/nn.c
 
 # +test: console I/O goes to z88dk-ticks' stdin/stdout. No --list, so the
-# DeZog listings (firmware/*.lis) are not overwritten.
+# DeZog listings (src/firmware/*.lis) are not overwritten.
 emu: | build
-	$(ZCC) +test -compiler=sdcc -m -o build/emu.bin firmware/z80_serial_main.c firmware/nn.c firmware/snapregs.c
+	$(ZCC) +test -compiler=sdcc -m -o build/emu.bin src/firmware/z80_serial_main.c src/firmware/nn.c src/firmware/snapregs.c
 
 # Board: +z80's default ROM layout (code from 0x0000, RAM from 0x8000).
 # CRT_ENABLE_EIDI=0x01 keeps interrupts off, the firmware polls the ACIA.
 # Write build/board.rom to the EEPROM.
 rom: | build
 	$(ZCC) +z80 -compiler=sdcc -m -pragma-define:CRT_ENABLE_EIDI=0x01 -create-app \
-	    -o build/board.bin firmware/z80_serial_main.c firmware/nn.c firmware/snapregs.c
+	    -o build/board.bin src/firmware/z80_serial_main.c src/firmware/nn.c src/firmware/snapregs.c
 
 # --- Patched z88dk-ticks for the live debug view -----------------------------
-# Copies z88dk's ticks source into build/, applies tools/ticks-viz.patch
-# (adds -shm, which shares memory, registers and accesses with host/z80debug.py)
+# Copies z88dk's ticks source into build/, applies src/tools/ticks-viz.patch
+# (adds -shm, which shares memory, registers and accesses with src/host/z80debug.py)
 # and builds it there. The installed z88dk is not touched.
 
 ticks-viz: $(VIZ_TICKS)
 
-$(VIZ_TICKS): tools/ticks-viz.patch
+$(VIZ_TICKS): src/tools/ticks-viz.patch
 	rm -rf $(VIZ)
 	mkdir -p $(VIZ)/src $(VIZ)/ext
 	cp -R $(TICKS_SRC)/ticks $(TICKS_SRC)/common $(TICKS_SRC)/Make.common $(VIZ)/src/
 	cp -R $(TICKS_SRC)/../ext/uthash $(VIZ)/ext/
 	find $(VIZ) \( -name '*.o' -o -name '*.d' \) -delete
-	patch -d $(VIZ) -p1 < tools/ticks-viz.patch
+	patch -d $(VIZ) -p1 < src/tools/ticks-viz.patch
 	$(MAKE) -C $(VIZ)/src/ticks z88dk-ticks
 
 # --- Demo ---------------------------------------------------------------------
 
 ifdef PORT
 demo: $(ART)/weights.bin
-	$(PYTHON) host/demo.py board $(PORT) $(if $(DEBUG),--debug)
+	$(PYTHON) src/host/demo.py board $(PORT) $(if $(DEBUG),--debug)
 else
 # The emulator runs the EEPROM image itself (ticks emulates the board's ACIA)
 demo: rom $(ART)/weights.bin
-	$(PYTHON) host/demo.py
+	$(PYTHON) src/host/demo.py
 endif
 
 clean:
-	rm -rf build firmware/*.lis
+	rm -rf build src/firmware/*.lis

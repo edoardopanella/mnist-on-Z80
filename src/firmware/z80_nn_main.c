@@ -23,7 +23,7 @@
 #define CASE    ((const uint8_t *)0x7800)
 #define MAILBOX ((volatile uint8_t *)0xF000)
 
-/* Offsets inside one testvec record (spec §5.2). */
+/* Offsets inside one testvec record (spec §4.2). */
 #define REC_X     0
 #define REC_ACC1  784
 #define REC_HQ    (REC_ACC1 + 4 * N_HID)

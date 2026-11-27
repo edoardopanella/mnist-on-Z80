@@ -1,4 +1,4 @@
-"""Tests for host/draw.py preprocess(). Run with: pytest tests/test_preprocess.py"""
+"""Tests for src/host/draw.py preprocess(). Run with: pytest tests/test_preprocess.py"""
 
 import os
 import sys
@@ -6,7 +6,7 @@ import sys
 import numpy as np
 from PIL import Image, ImageDraw
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "host"))
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src", "host"))
 from draw import preprocess  # noqa: E402
 
 

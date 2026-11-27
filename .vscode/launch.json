@@ -17,7 +17,7 @@
             },
             "rootFolder": "${workspaceFolder}",
             "z88dkv2": [
-                { "path": "firmware/*.lis", "srcDirs": [""], "mapFile": "build/firmware.map" }
+                { "path": "src/firmware/*.lis", "srcDirs": [""], "mapFile": "build/firmware.map" }
             ],
             "topOfStack": "__register_sp",
             "loadObjs": [

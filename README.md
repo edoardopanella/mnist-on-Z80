@@ -1,269 +1,188 @@
 # MNIST on Z80
 
-Handwritten digit recognition on a Z80. A 784 → 32 → 10 MLP is trained in floating point with PyTorch, converted to integer-only arithmetic, and run in C on the Z80. You draw a digit on the laptop, and the Z80 classifies it, in the `z88dk-ticks` emulator. The same firmware is built as an EEPROM image for Grant Searle's breadboard Z80; that exact image passes all tests in the emulator, but it has not yet been run on the physical board. The C code reproduces the Python integer reference bit for bit.
+Handwritten digit recognition on an 8-bit Z80 processor. You draw a digit on the laptop; a Z80 classifies it with a small neural network and sends the answer back.
+
+- A 784 → 32 → 10 neural network (MLP) is trained in floating point with PyTorch, on binarized MNIST.
+- It is converted to integer-only arithmetic: `int8` weights, `int32` sums, no floating point on the Z80.
+- The C inference code runs on the Z80 and reproduces the Python integer reference **bit for bit**.
+- The Z80 runs in the `z88dk-ticks` emulator. The same firmware also builds as an EEPROM image intended for Grant Searle's breadboard Z80, and the emulator runs that exact image through all the tests.
+
+| Model | Accuracy on the 10,000 MNIST test images |
+| --- | --- |
+| Float (PyTorch) | 96.01% |
+| Integer (Python reference, and the Z80) | 95.96% |
+| Float and integer give the same digit | 99.67% |
+
+One classification takes about 5 million Z80 clock cycles: about 0.7 s at 7.3728 MHz, the clock of the board the firmware is meant for.
 
 Federico Scaffidi Muta, Edoardo Panella. Software Engineering (20875) project, Bocconi University, Fall 2026.
 
-## Layout
+## Contents
 
-```
-training/   Python pipeline: train → quantize → check → export
-firmware/   C inference library and Z80 programs
-host/       laptop tools: drawing app, Z80 link library, demo, network view, debug panel
-tests/      pytest tests and DeZog input generator
-tools/      ticks-viz.patch: z88dk-ticks with a live view for the debug panel
-docs/       spec.md (formats and algorithm), plan.md, toolchain guide
-artifacts/  weights.bin and testvec.bin (committed); MNIST data, mlp.pt, quantized.npz (generated, not committed)
-```
+1. [Repository structure](#repository-structure)
+2. [Requirements](#requirements)
+3. [Setup](#setup)
+4. [Reproducing the results](#reproducing-the-results)
+5. [Running on the board](#running-on-the-board)
+6. [How it works](#how-it-works)
+7. [Make targets](#make-targets)
+8. [Further documentation](#further-documentation)
+9. [License](#license)
 
-## Quick start
+## Repository structure
 
-```
-make             # builds every Z80 program with the committed weights (trains only if weights.bin is missing)
-make ticks-viz   # once: the patched emulator for the live debug view (section 4)
-make test        # all tests, including the 105 test vectors on the emulated Z80
-make demo        # draw a digit, the emulated Z80 classifies it
-```
-
-`make clean` removes `build/`, `build/ticks-viz` included: run `make ticks-viz` again after it. The Makefile uses `.venv/bin/python` when there is a `.venv`; set `PYTHON=` to use another interpreter.
-
-Requirements: Python 3 with `numpy` and `pillow` for the demo (and `pyserial` for the board); `torch`, `torchvision` and `pytest` for training and the tests (the tests read `testvec.bin` through `training/export.py`). Also z88dk (`zcc`, `z88dk-ticks`) on `PATH`, and VS Code with DeZog for step-by-step debugging. The live debug view (`make ticks-viz`) also needs z88dk's sources (`src/` next to its `bin/`), a C compiler and `patch` (Xcode command-line tools). Installation: `docs/z80-toolchain-macos-guide.md`.
-
-## 1. Training pipeline
-
-Run from the repository root, in this order (`make train` runs them all). Each step reads what the previous one wrote to `artifacts/`.
-
-```
-python training/train.py       # -> artifacts/mlp.pt
-python training/quantize.py    # -> artifacts/quantized.npz
-python training/reference.py   # prints float vs integer accuracy (also: make check)
-python training/export.py      # -> artifacts/weights.bin, artifacts/testvec.bin
+```text
+mnist-on-Z80/
+├── src/
+│   ├── training/     Python: train the network, quantize it, check it, export it for the Z80
+│   ├── firmware/     C code for the Z80: the inference library and the Z80 programs
+│   ├── host/         Python on the laptop: drawing app, link to the Z80, network view, debug panel
+│   └── tools/        ticks-viz.patch: adds a live view to the z88dk-ticks emulator
+├── tests/            pytest tests: the emulated Z80 against Python, bit for bit
+├── artifacts/        weights.bin and testvec.bin: the trained network and test vectors, for the Z80
+├── docs/             guide.md, spec.md, Z80 toolchain installation guide
+├── Makefile          every build, test and demo command (see "Make targets")
+├── pyproject.toml    Python dependencies (uv.lock and requirements.txt pin the exact versions)
+└── LICENSE
 ```
 
-| File | What it does |
-| --- | --- |
-| `train.py` | Downloads MNIST and binarizes it (pixel = 1 if > 0.5). Trains the MLP (Adam, lr 1e-3, batch 64, 10 epochs, seed 0) and saves the float weights. Also defines `MLP`, `get_data()` and the paths that the other scripts import. |
-| `quantize.py` | Quantizes weights to `int8` (symmetric, one scale per layer) and biases to `int32`. Calibrates the hidden-layer scale on the training set. Replaces the float rescale between the layers with an integer multiply `M0` and a right `shift`, choosing the largest `shift` that cannot overflow 32 bits. |
-| `reference.py` | `infer_int()` is the integer-only network, computed step by step exactly as the C code does: layer 1, ReLU, requantize, layer 2, argmax. `evaluate()` compares it with the float model. |
-| `export.py` | Writes little-endian binaries for the C code: `weights.bin` with the weights, and `testvec.bin` with 105 test cases (100 MNIST images plus 5 edge cases). Each case stores the image and every intermediate value. The script reads both files back to check them. Formats: `docs/spec.md` §5. |
+Generated and not committed: `build/` (the Z80 programs), `artifacts/data/` (MNIST, downloaded on first training), `artifacts/mlp.pt` and `artifacts/quantized.npz` (intermediate training outputs).
 
-Test-set results: float 96.01%, integer 95.96%, float/integer agreement 99.67%.
+## Requirements
 
-## 2. Inference on the Z80
+Developed and tested on macOS (Apple silicon).
 
-| File | What it does |
-| --- | --- |
-| `firmware/nn.h`, `nn.c` | `nn_infer()` is the C version of `infer_int()`. It uses only fixed-width types, so it is correct with the Z80's 16-bit `int`. Because the inputs are binary, layer 1 needs only additions. `struct nn_weights` has the same layout as the `weights.bin` payload. |
-| `firmware/z80_serial_main.c` | The demo firmware: receives commands from the laptop, runs `nn_infer`, replies. See section 3. |
-| `firmware/z80_nn_main.c` | DeZog test: runs `nn_infer` on one test case loaded into memory. Writes to the mailbox whether `acc1`, `h_q`, `acc2` and the digit all match `testvec.bin`. |
-| `firmware/z80_test_main.c` | Toolchain sanity check: writes a fixed value to a mailbox at `0xF000`. |
-| `firmware/snapregs.h`, `snapregs.c` | `snap_regs()` copies every register into `struct regs`, for the `G` command of `z80_serial_main.c`. |
-
-## 3. How the laptop talks to the Z80
-
-The drawing window runs on the laptop; the network runs on the Z80. They exchange text lines. The firmware, the bridge and the protocol are the same whether the Z80 is emulated or real; only the way characters travel changes.
-
-```
-host/draw.py ─► host/demo.py ─► host/z80nn.py ─┬─ emu ──► z88dk-ticks running build/board.rom  (emulated ACIA, the demo's default)
-  drawing         glue           Z80NN bridge  │          z88dk-ticks running build/emu.bin    (console)
-  window                                       └─ board ─► USB serial ─► ACIA ─► build/board.rom on the EEPROM
-```
-
-### The protocol (`docs/spec.md` §7.5)
-
-One command per line, one reply per command. Bytes are sent as hexadecimal text.
-
-| Command | Reply | Meaning |
+| What | Needed for | How to get it |
 | --- | --- | --- |
-| `V` | `Z80NN 2` | Version: checks that the Z80 is there |
-| `W oooo <hex>` | `OK` | Writes up to 64 bytes of the weights at offset `oooo` (400 lines in total) |
-| `C` | `C xxxx` | 16-bit checksum of the weights received, compared by the laptop |
-| `I <196 hex>` | `R d` | Classifies a 28×28 image packed in 98 bytes; `d` is the digit |
-| `D <196 hex>` | `A1 …`, `H …`, `A2 …`, `R d` | Same as `I`, plus every intermediate value |
-| `G` | `G af bc de hl ix iy sp pc af' bc' de' hl' i r` | Registers in hex, snapped right after the last `I`/`D` inference (all `0` before the first one). The same inference copies 256 bytes of stack from SP into `stack_copy`, for `M` |
-| `M aaaa nn` | `M <hex>` | Reads `nn` bytes (`01`..`40` hex) from address `aaaa`; wraps at `FFFF` |
+| Python 3.12 or newer, with Tkinter | All Python code (the drawing window uses Tk) | [uv](https://docs.astral.sh/uv/) installs a Python that includes Tk. With Homebrew's Python, also `brew install python-tk@3.12` |
+| [uv](https://docs.astral.sh/uv/getting-started/installation/), or pip | The virtual environment | `curl -LsSf https://astral.sh/uv/install.sh \| sh`, or use pip (below) |
+| [z88dk](https://github.com/z88dk/z88dk): `zcc` and `z88dk-ticks` on `PATH` | Compiling C for the Z80, and emulating it | [docs/z80-toolchain-macos-guide.md](docs/z80-toolchain-macos-guide.md), Step 1 (Step 2, sjasmplus, is not needed here) |
+| make, a C compiler, patch | The build, and the live debug view | Xcode command-line tools: `xcode-select --install` |
+| *Optional:* z88dk's source tree (`src/` and `ext/` next to its `bin/`) | The live debug view (`make ticks-viz`) | There when z88dk is built from source (toolchain guide, Option C). Check: `ls "$(dirname "$(command -v zcc)")/../src/ticks"` |
+| *Optional:* VS Code with DeZog | Stepping through the C code on a simulated Z80 | Toolchain guide, Step 3 |
+| *Optional:* Grant Searle's Z80 board, an EEPROM programmer, a USB-serial adapter | Running on the hardware the firmware is intended for | [Running on the board](#running-on-the-board) |
 
-Errors (`ERR CMD`, `ERR HEX`, `ERR LEN`, `ERR OFS`, `ERR LONG`) leave the firmware running. The weights live in the Z80's RAM, so they are uploaded again every time the program starts.
+## Setup
 
-### One firmware, two builds
+```bash
+git clone https://github.com/edoardopanella/mnist-on-Z80.git
+cd mnist-on-Z80
 
-`firmware/z80_serial_main.c` is a single source file. Only its three character functions (`ser_init`, `ser_getc`, `ser_putc`) differ between builds:
+# Python environment in .venv, with the exact versions of uv.lock
+uv sync
+# or, without uv:
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 
-| Build | Command | Output | Characters travel through |
-| --- | --- | --- | --- |
-| Emulator | `make emu` | `build/emu.bin` | The console of `z88dk-ticks` (its stdin/stdout). Uses `fgetc_cons()`, which does not echo the input back. |
-| Board | `make rom` | `build/board.rom` | The board's MC6850 ACIA at ports `0x80`/`0x81`, polled with interrupts off. 115,200 baud with the 7.3728 MHz crystal. |
-
-Board memory map: code in ROM from `0x0000` (about 3.9 KB); weights, buffers and `stack_copy` in RAM from `0x8000` to about `0xEA97`; stack below `0xFFFF`. The `.map` files in `build/` have the exact addresses (`docs/spec.md` §7.4).
-
-### The bridge: `host/z80nn.py`
-
-`Z80NN(target, where)` hides where the Z80 is. After it connects, `version()`, `load_weights()`, `classify()`, `classify_debug()`, `registers()` and `read_memory()` work the same way everywhere.
-
-| `target` | `where` | What it does |
-| --- | --- | --- |
-| `emu` | a Z80 program (`build/emu.bin` or `build/board.rom`) | Starts `z88dk-ticks` on it with `-counter`, because ticks otherwise stops after about 10 classifications. Its stdout is a pseudo-terminal (see below). |
-| `board` | a serial port, e.g. `/dev/tty.usbserial-XXXX` | Opens it at 115,200 baud, 8N1, RTS/CTS flow control |
-| `local` | a program on the laptop | Runs it and talks to it through stdin/stdout (none is built by this repo) |
-
-### Testing the EEPROM image before writing it
-
-`z88dk-ticks` already emulates an ACIA on the same ports as the board, but it never flushes its output, so replies sent through a pipe never arrive. `Z80NN` therefore gives ticks a pseudo-terminal as stdout: on a terminal the C library flushes at every `\n`. With it, the exact `build/board.rom` that goes on the EEPROM runs in the emulator, and the demo runs that image by default. `tests/test_emu.py` runs all 105 test vectors on both builds and checks every intermediate value.
-
-While the firmware waits for a command, ticks waits too, using no CPU, although `ser_getc()` polls the ACIA's status register. This relies on a quirk of the installed z88dk: its status read reports a received byte even when none is waiting (`kbhit()` returns −1, not 0, and the emulation takes that as true), so the firmware goes straight to reading the data register, and that read blocks until a byte arrives. A z88dk that reports "empty" correctly would make the firmware spin, using a full core; `tests/test_ticks_viz.py` fails if that happens (`docs/spec.md` §7.7).
-
-At end of input (the laptop closed ticks' stdin) the firmware cannot tell: plain ticks gives it `0xFF` bytes forever, so `Z80NN.close()` kills it after 2 s. The patched ticks of the live view (`-shm`, section 4) exits by itself instead.
-
-## 4. Running the demo
-
-Run everything from the repository root. The demo uses the committed `artifacts/weights.bin`; `make` trains again only if it is missing.
-
-### On the emulator
-
+# Check the setup
+.venv/bin/python -c "import tkinter, torch; print('Python OK')"
+command -v zcc z88dk-ticks          # both must print a path
 ```
+
+The Makefile uses `.venv/bin/python` by itself, so you do not need to activate the environment for `make`. To use another interpreter: `make PYTHON=/path/to/python ...`.
+
+## Reproducing the results
+
+Run every command from the repository root. Steps 1 to 3 use the committed network in `artifacts/`; step 4 trains it again from scratch.
+
+### 1. Build the Z80 programs
+
+```bash
+make
+```
+
+This compiles the firmware with z88dk into `build/`: `emu.bin` (for the emulator's console), `board.rom` (the EEPROM image, which the emulator can also run) and `firmware_*.bin` (for DeZog).
+
+### 2. Run the tests
+
+```bash
+make test
+```
+
+This builds what the tests need, including the patched emulator when z88dk's sources are available, and then runs pytest. Expected result: **`53 passed`**. The central test runs all 105 test vectors on the emulated Z80, with both builds, and checks that every intermediate value matches Python exactly. If something is missing (for example z88dk's sources), the affected tests are skipped and listed with the reason.
+
+### 3. Run the demo
+
+```bash
 make demo
 ```
 
-This is the same as:
+A window opens. Draw a digit with the mouse and press **Recognize** (or Enter): the emulated Z80 classifies it and the digit appears below the drawing. **Clear** (or Esc) starts again. Under the drawing you see the network's hidden neurons and the 10 scores; on the right, a debug panel shows the Z80's memory, registers and stack.
 
-```
-make rom                  # -> build/board.rom
-python host/demo.py       # target emu, program build/board.rom
-```
+With the patched emulator (built by `make test`, or once with `make ticks-viz`) the panel is live: the Z80 runs at 1 MHz and you can watch it compute neuron by neuron. Without it, the panel updates after each digit. All demo options are in [docs/guide.md §4](docs/guide.md#4-running-the-demo).
 
-The emulator runs the same `build/board.rom` that goes on the EEPROM. To run the console build instead: `make emu`, then `python host/demo.py emu build/emu.bin`.
+### 4. Train the network from scratch (optional)
 
-### On the board
-
-```
-make rom                  # -> build/board.rom
+```bash
+make train    # downloads MNIST, trains, quantizes, exports (under a minute on a laptop CPU, plus the download)
+make check    # prints the accuracies
 ```
 
-1. Write `build/board.rom` to the EEPROM with your programmer, for example `minipro -p <chip> -w build/board.rom -s`. `-s` accepts a file smaller than the chip.
-2. Put the EEPROM in the board, connect the USB-serial adapter, and find its port with `ls /dev/tty.usb*`.
-3. Run:
+Expected output of `make check`:
 
-   ```
-   make demo PORT=/dev/tty.usbserial-XXXX
-   ```
-
-   This is the same as:
-
-   ```
-   python host/demo.py board /dev/tty.usbserial-XXXX
-   ```
-
-   Add `DEBUG=1` (or `--debug`) for the debug panel (below).
-
-### Arguments of `host/demo.py`
-
-```
-python host/demo.py [TARGET] [WHERE] [--debug | --no-debug] [--map FILE] [--live | --no-live] [--speed MHZ]
+```text
+Float accuracy:       96.01%
+Integer accuracy:     95.96%
+Float/int agreement:  99.67%
 ```
 
-| `TARGET` | `WHERE` | Example |
-| --- | --- | --- |
-| `emu` (default) | Z80 program for the emulator, default `build/board.rom` | `python host/demo.py`, `python host/demo.py emu build/emu.bin` |
-| `board` | Serial port of the board (required) | `python host/demo.py board /dev/tty.usbserial-XXXX` |
-| `local` | Program on the laptop that speaks the protocol | `python host/demo.py local ./my_program` |
+`make train` overwrites `artifacts/weights.bin` and `artifacts/testvec.bin`. Training is seeded, and on our machine it reproduces the committed files byte for byte; `git status artifacts/` shows whether yours differ. After retraining, run `make test` again: it checks the Z80 against the new test vectors.
 
-| Option | Meaning |
+## Running on the board
+
+The board build is intended for Grant Searle's breadboard Z80: a Z80 at 7.3728 MHz, code in an EEPROM from `0x0000`, RAM from `0x8000`, and an MC6850 ACIA serial port at 115,200 baud.
+
+1. Build the EEPROM image: `make rom` writes `build/board.rom`.
+2. Write it to the EEPROM, for example `minipro -p <chip> -w build/board.rom -s` (`-s` accepts a file smaller than the chip).
+3. Put the EEPROM in the board, connect the USB-serial adapter and find its port: `ls /dev/tty.usb*`.
+4. Run the demo on it: `make demo PORT=/dev/tty.usbserial-XXXX`. Add `DEBUG=1` for the debug panel, read over the serial line.
+
+## How it works
+
+```text
+ laptop (Python)                                              Z80 (C, compiled with z88dk)
+ ───────────────                                              ────────────────────────────
+ src/training/   train → quantize → export
+                                      │
+                                      ▼
+                         artifacts/weights.bin ─── uploaded at start ───► weights in RAM
+                                                                                │
+ src/host/       drawing window ─── 28×28 image, as text lines ────────► nn_infer()  (src/firmware/)
+                 network view   ◄── digit and intermediate values ──────────────┘
+                 debug panel
+```
+
+1. **Training** (`src/training/`). PyTorch trains the MLP on MNIST with every pixel set to 0 or 1. The weights are then quantized to `int8`, with one scale per layer. The float rescale between the two layers becomes an integer multiply and shift. `reference.py` runs this integer network in Python; it is the reference the Z80 must match exactly. `export.py` writes the weights, and 105 test cases with every intermediate value, as little-endian binaries.
+2. **Inference** (`src/firmware/`). `nn.c` implements the same integer network in portable C, correct with the Z80's 16-bit `int`. The inputs are binary, so the first layer needs only additions.
+3. **Link** (`src/firmware/z80_serial_main.c`, `src/host/z80nn.py`). The laptop and the Z80 exchange text lines: upload the weights, send an image, read back the digit, the registers or any memory. The same firmware is built for the emulator and for the board. Only the way characters travel differs: the emulator's console, or the board's serial chip (ACIA), which `z88dk-ticks` also emulates.
+4. **Demo and debug view** (`src/host/`). The drawing window crops, scales and centres the digit the way MNIST did, then sends it. A patched `z88dk-ticks` shares the Z80's memory with the laptop, so the debug panel shows every read, write and instruction fetch while the network runs.
+
+Details of each part: [docs/guide.md](docs/guide.md).
+
+## Make targets
+
+| Command | What it does |
 | --- | --- |
-| `--debug` / `--no-debug` | Show or hide the debug panel. Default: shown on `emu`, hidden on `board` and `local` (`local` cannot have it). |
-| `--map FILE` | The `.map` file of the program that runs, for the symbols. Default: next to the emulator program (`build/board.map` for `build/board.rom`, `build/emu.map` for `build/emu.bin`), or `build/board.map` for the board. It must come from the same build as the EEPROM contents. |
-| `--live` / `--no-live` | Emulator: live debug view with the patched ticks. Default: on when `make ticks-viz` has been run. |
-| `--speed MHZ` | Live view: the emulated clock, default `1` (one inference takes about 5 s to watch); `0` = as fast as possible. Changeable in the panel. |
+| `make` | Builds every Z80 program into `build/` (and the DeZog inputs). Trains only if `artifacts/weights.bin` is missing |
+| `make test` | Builds what the tests need, then runs all tests |
+| `make demo` | Drawing demo on the emulator, running the EEPROM image `build/board.rom` |
+| `make demo PORT=/dev/tty.usbserial-XXXX` | Drawing demo on the board, over its serial port (`DEBUG=1`: with the debug panel) |
+| `make train` | Trains, quantizes and exports again from scratch |
+| `make check` | Prints float vs integer accuracy |
+| `make emu` / `make rom` | Builds the emulator program `build/emu.bin` / the EEPROM image `build/board.rom` |
+| `make ticks-viz` | Builds the patched emulator for the live debug view in `build/ticks-viz` |
+| `make firmware`, `make inputs CASE=n` | DeZog program and inputs for one test case ([guide §5](docs/guide.md#5-debugging-with-dezog)) |
+| `make clean` | Removes `build/`, the patched emulator included; `artifacts/` are kept |
 
-### What you see
+## Further documentation
 
-The script prints `Connected: Z80NN 2`, uploads the weights, prints `Weights loaded, checksum OK`, and opens the window. Draw a digit with the mouse, then press **Recognize** or Enter; the digit the Z80 computed appears below. Press **Clear** or Esc to start again. The preview on the right shows the 28×28 image the Z80 receives.
-
-The UI is meant to explain what happens inside the machine: every part has a short caption in plain words.
-
-In the live view (emulator, debug panel) a slow clock makes one digit take seconds. **Stop** ends it: the Z80 finishes that inference at full speed, its answer is dropped, and the clock goes back to the one you chose. Pressing **Recognize** (or Enter) while the Z80 works does the same, then runs the new drawing; **Clear** (or Esc) also stops it.
-
-One classification costs about 5 million Z80 clock cycles: instant on the emulator, about 0.7 s on the board at 7.3728 MHz. On the board, uploading the weights takes a few seconds. The Z80 works in a background thread, so the window stays responsive meanwhile.
-
-### The network view
-
-With the debug panel, the space under the drawing shows the network the Z80 computes (`host/network_view.py`), in order:
-
-| Part | What it shows |
+| Document | Contents |
 | --- | --- |
-| Headline | What the Z80 is doing now (live: *Unpacking the image it received*, *Layer 1, neuron #12: adding its weights at the 74 lit pixels*, *Layer 2, digit 4*, then *Network done: writing the 74 results as text for the laptop*), then the answer with its score and the runner-up. With `D` that last phase is about a third of a digit's time: every `acc1`, `h_q` and `acc2` value goes out as decimal text, and each digit of a 32-bit number costs a 32-bit division. |
-| Layer 1 | 32 cells, one per hidden neuron: `h_q`, black = 0 (cut by ReLU) to white = the strongest of this digit. Live: the neuron being computed is outlined in yellow, the ones done turn grey; the values come with the `D` reply. Hover: the sum (`acc1`), ReLU and the rescaled value. Click: Memory shows that neuron's 784 weights as a 28×28 image. |
-| Layer 2 | The 10 scores (`acc2`), the highest in green: the answer. Live: the score being computed is outlined. |
+| [docs/guide.md](docs/guide.md) | Each part in detail: the training scripts, the firmware, the serial protocol, every demo option, the debug panel, DeZog, the tests |
+| [docs/spec.md](docs/spec.md) | The contract between the parts: the quantization scheme, the integer algorithm, the binary file formats, the protocol, the live-view file |
+| [docs/z80-toolchain-macos-guide.md](docs/z80-toolchain-macos-guide.md) | Installing z88dk and VS Code with DeZog on macOS |
 
-The live step comes from `infer_step()` (`host/z80debug.py`): `layer1_neuron(j)` reads only row *j* of `W1q`, `layer2_neuron(k)` only row *k* of `W2q`, so the weight rows read since the previous capture say which neuron the Z80 is on. At 1 MHz each hidden neuron takes about 0.15 s, slow enough to follow.
+## License
 
-### Focus on hover
+[MIT](LICENSE), © 2026 Federico Scaffidi Muta, Edoardo Panella.
 
-With the network view and the debug panel, the part under the mouse stays sharp and every other part fades, to keep the attention on one thing: the drawing, the preview, layer 1, layer 2, and each frame of the debug panel. The faded parts keep updating. The **Focus on hover** checkbox next to Clear turns it off.
-
-Tk cannot blur or fade a widget, so `host/focus.py` lays a borderless window, 75% opaque and in the window's background colour, over each faded part; four thin blue windows draw the focused part's border. It reads the mouse position 12 times a second rather than Tk's enter and leave events, which also fire on child widgets and on the veils. In a gap between parts the focus stays where it was; outside the window, or with another app in front, nothing is faded. While the window is dragged the veils hide (Tk learns the window's new position only now and then, so veils moved along would trail behind it) and come back 0.25 s after it stops. A veil would take a click meant for the part under it, but the part comes into focus as soon as the mouse moves over it.
-
-### The debug panel
-
-With the panel, the window has a DeZog-style view on the right. Images go with `D` instead of `I` (so `_trace` is filled). It has two modes:
-
-| Mode | When | How often |
-| --- | --- | --- |
-| **Live** | Emulator, after `make ticks-viz` | 20 times a second, also during an inference. Every read, write and instruction fetch. |
-| **Snapshot** | The board (`--debug`), or the emulator without the patch (or `--no-live`) | After each result, read with `G` and `M`. |
-
-| Part | What it shows |
-| --- | --- |
-| Memory map | All of memory as named blocks in address order, each with its size: Program, Weights, Image (`x`), Results (`trace`), Serial (`buf`, `line`), Debug (`stack_copy`, `regs`), Free, Stack. Each block has its own strip of accesses in DeZog's colours (read yellow, written red, code running blue), so small variables are as visible as the weights. White line and arrow: PC; green box: the memory window. Under it, one sentence says what the Z80 is doing (from the call stack) and which blocks it reads and writes. Hover for the address and symbol, click to show that address. |
-| Registers | All registers, red when they changed since the previous snapshot; F and F' decoded (`SZ5H3PNC`). |
-| Call stack | PC, then the return addresses found through SDCC's IX frame chain (`_cmd_infer+0xB4`, `_main+0xE3`). |
-| Stack | Words from SP, with code addresses named; frame return addresses in blue. It scrolls, and keeps its place while the view refreshes. |
-| Memory | A window anywhere in the 64 KB. **Go to** a variable, SP or PC, or type an **Address** (hex, Enter); scroll with the wheel, PgUp/PgDn or the scroll bar (the bar is the whole 64 KB). Only the rows shown are read, so it works on the board too. **View**: *Hex*, 16 × 16 bytes and ASCII, each byte coloured by its access; or *Image 28×28*, 28 pixels per row like the MNIST frame, with a thin ring in the access colour. **Pixel** *1 byte* shows `x` (0/1: white = 1); other bytes are drawn as signed, + orange and − blue, so at `weights` each 28×28 is one hidden neuron's `W1q` row (PgDn: the next neuron). *1 bit* shows `buf`, the packed image the laptop sent. Go to picks the right one for `x` and `buf`. It opens on `x` as an image. Hover the image for the address (at `weights`: which neuron and pixel the weight belongs to). In snapshot mode the first 3 bytes of `buf` hold the arguments of the panel's own last `M` command. **Refresh** reads it again. |
-| Clock (live only) | The emulated clock: 100 kHz, 1 MHz, 3.5 MHz, 7.37 MHz (the board's), or max; **Pause** stops the Z80 between two instructions. Under it, the T-states of the current digit (from 0 at each Recognize), what they would take on the board, and the measured MHz (`idle` while the Z80 waits). A digit in the panel costs more than 5 million T-states: `D` also decodes the image and sends back every intermediate value. |
-
-**Live mode.** `make ticks-viz` copies z88dk's `src/ticks` into `build/ticks-viz`, applies `tools/ticks-viz.patch` and builds it there; the installed z88dk is not changed. The patch adds one option, `-shm <file>`: ticks keeps the emulated RAM in that file and marks there every access (bits read, write, prog, set in `get_memory()`/`put_memory()`), and publishes the registers and T-states about 100 times per emulated second. It also sleeps to match the clock the panel asks for, waits while paused, and exits at end of input when it runs `build/board.rom` (section 3). `LiveSource` (`host/z80debug.py`) maps the same file; the panel shows the accesses fading out in about half a second, like DeZog. Without `-shm` the patched ticks behaves like the original. The weights always go up at full speed; the clock applies from the first digit. The patch is made for the z88dk sources installed here: if a newer z88dk no longer accepts it, `make ticks-viz` fails and the demo falls back to snapshots.
-
-**The ticks patch.** `tools/ticks-viz.patch` adds `viz.h` and `viz.c` to `src/ticks`, and short hooks to `memory.c` (access bits), `ticks.c` (publishing, clock and pause in the CPU loop), `ticks_main.c` (the `-shm` option), `hook_console.c` (publishing before a blocking read, the console's and the ACIA's), `acia.c` (exit when the ACIA's data read finds the end of input) and its `Makefile`. The shared file is 131,136 bytes: a 64-byte header (magic, a sequence counter, clock, pause, T-states, registers), the 64 KB of RAM, then 64 KB of access bits. Its exact layout and rules are in `docs/spec.md` §7.7.
-
-**Snapshot mode.** Snapshots are: registers and stack as they were when `nn_infer` returned (the firmware copies the stack into `stack_copy`, because `G` and `M` reuse that area), memory as it is when read. The firmware cannot see its own bus, so the bar shows only writes, as the bytes that changed since the previous snapshot (variables, stack and memory window; the weights are not compared). On the board one refresh moves about 2 KB over the serial line, a fraction of a second.
-
-## 5. Debugging with DeZog
-
-The demo runs in z88dk-ticks (section 4). DeZog is for debugging the C code step by step in VS Code: breakpoints, single steps, C source lines, registers and memory, in DeZog's own simulator (zsim). It runs `firmware/z80_nn_main.c` on one test case.
-
-Memory map: code at `0x0000`, weights at `0x1000`, test case at `0x7800`, variables from `0x8000`, mailbox at `0xF000`.
-
-```
-make inputs CASE=0   # build/weights_payload.bin (-> 0x1000), build/case.bin (-> 0x7800)
-make firmware        # z80_nn_main.c -> launch config "Z80 zsim"
-```
-
-Start the "Z80 zsim" config in VS Code. It stops at the first instruction; set breakpoints in `nn.c` or `z80_nn_main.c` and continue. When the program finishes, the mailbox at `0xF000` says whether `acc1`, `h_q`, `acc2` and the digit all match `testvec.bin` (byte layout at the top of `z80_nn_main.c`). `make firmware FW=firmware/z80_test_main.c` builds the toolchain sanity check instead.
-
-## 6. Host tools
-
-| File | What it does |
-| --- | --- |
-| `host/draw.py` | Tkinter drawing window. `preprocess()` reproduces MNIST's framing: crop, scale to 20 px, center of mass at (14, 14) in 28×28, binarize. `python host/draw.py` runs it without a Z80 and prints the image as ASCII. |
-| `host/z80nn.py` | The `Z80NN` bridge (section 3). |
-| `host/demo.py` | Connects `DrawingApp` to `Z80NN` (section 4), with the debug panel if asked. |
-| `host/z80debug.py` | `MapSymbols` (symbols and memory-map blocks from a z88dk `.map`), `SnapshotSource` (a `Snapshot` through `G`/`M`), `LiveSource` (a `Snapshot` from the patched ticks' shared file, plus clock and pause), the call-stack walk. No Tk. |
-| `host/focus.py` | `HoverFocus`: the part under the mouse in focus, the others faded (section 4). |
-| `host/network_view.py` | `NetworkView`, the network under the drawing: hidden neurons and scores, step by step (section 4). |
-| `host/debug_panel.py` | `DebugPanel`, the Tk view of a `Snapshot` (section 4). |
-| `tools/ticks-viz.patch` | The live-view patch for `z88dk-ticks`, built by `make ticks-viz` (section 4). |
-
-## Tests
-
-```
-make test     # builds emu, rom (and ticks-viz when z88dk's sources are there), then pytest
-make check    # integer reference vs float model
-```
-
-`make test` lists every skipped test with its reason: a test is skipped only when what it needs is missing (a build, `artifacts/`, `z88dk-ticks`, a display for the `Worker` test).
-
-| Test | What it checks |
-| --- | --- |
-| `tests/test_preprocess.py` | The drawing preprocessing: empty input, bounding box, 20 px scaling, centering. |
-| `tests/test_z80debug.py` | The map parser on both builds (sizes, symbols, memory-map blocks, board layout), flag decoding, snapshots on both builds (scores, call stack, changed bytes), the order and errors of `draw.Worker`, the image decoding of `x` (bytes) and `buf` (bits) after a real inference, `infer_step()` on both maps, the panel's memory scrolling (wheel, pages, bar, wrap at `FFFF`), image view (and a neuron's weights), focus on hover (veils, gaps, outside the window, off) and the stack keeping its place, and Stop in `DrawingApp` (answer dropped, the next drawing run after it). |
-| `tests/test_ticks_viz.py` | The patched ticks, on both builds: all 105 test vectors with `-shm`; the upload seen as writes by `cmd_write`; layer 1 reading exactly the weight rows of lit pixels; no instruction fetched from data; the call stack down to `main` in the middle of an inference; `infer_step()` following layer 1 neuron by neuron, then layer 2; `x` and `buf` as images; the per-digit T-states; the clock (2 MHz asked, at most 2.3 measured, so it is throttled) and Pause; `build/board.rom` waiting for a command with no T-states and no accesses (the guard for the ACIA quirk, section 3), the panel's clock saying `idle` then, and ticks exiting with status 0 within 1 s of the end of input. Skipped without `make ticks-viz`. |
-| `tests/test_emu.py` | All 105 test vectors through `Z80NN` on the emulated Z80, for both `build/emu.bin` and `build/board.rom`: every `acc1`, `h_q`, `acc2` and digit must match Python. Also checks the register snapshot (`G`: PC inside `cmd_infer`, SP in the stack) and memory reads (`M`: the weights and the unpacked image), and that errors leave the firmware running. A build that is missing is skipped (`make emu rom`). |
+`src/tools/ticks-viz.patch` modifies the source code of [z88dk](https://github.com/z88dk/z88dk), which is distributed under its own license, the Clarified Artistic License. MNIST is not included in this repository; it is downloaded by torchvision when the network is trained.

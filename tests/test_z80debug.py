@@ -1,4 +1,4 @@
-"""Tests for host/z80debug.py (map parsing, G/M snapshots) and the Tk panels.
+"""Tests for src/host/z80debug.py (map parsing, G/M snapshots) and the Tk panels.
 
 Map tests need build/emu.map and build/board.map (make emu rom). Snapshot
 tests also need z88dk-ticks. Tests with missing pieces are skipped.
@@ -14,8 +14,8 @@ import numpy as np
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "host"))
-sys.path.insert(0, os.path.join(ROOT, "training"))
+sys.path.insert(0, os.path.join(ROOT, "src", "host"))
+sys.path.insert(0, os.path.join(ROOT, "src", "training"))
 from z80debug import READ, WRITE, MapSymbols, Snapshot, SnapshotSource, flags, infer_step  # noqa: E402
 
 WEIGHTS = os.path.join(ROOT, "artifacts", "weights.bin")

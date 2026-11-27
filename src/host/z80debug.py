@@ -27,19 +27,19 @@ STACK_BYTES = 256               # bytes read from SP up (STACK_COPY in z80_seria
 LIVE_STACK_BYTES = 1024         # live reads are free, so read deep enough for main's frame
 MAX_FRAMES = 8                  # call stack depth
 
-# Variables of firmware/z80_serial_main.c listed in the memory view
+# Variables of src/firmware/z80_serial_main.c listed in the memory view
 VARIABLES = ("_weights", "_x", "_trace", "_line", "_buf", "_regs")
 # Memory-map block title for each variable
 BLOCK_TITLES = {"_weights": "Weights", "_x": "Image", "_trace": "Results",
                 "_buf": "Serial", "_line": "Serial", "_stack_copy": "Debug", "_regs": "Debug"}
 FREE_MIN = 1024                 # smaller gaps are merged into a neighbouring block
 
-N_IN, N_HID, N_OUT = 784, 32, 10      # firmware/nn.h
+N_IN, N_HID, N_OUT = 784, 32, 10      # src/firmware/nn.h
 TRACE_SIZE = 4 * N_HID + N_HID + 4 * N_OUT     # struct nn_trace: acc1, h_q, acc2
-# struct nn_weights (no padding, docs/spec.md §7.2): W1q, b1q, M0, shift, W2q, b2q
+# struct nn_weights (no padding, docs/spec.md §5.2): W1q, b1q, M0, shift, W2q, b2q
 W2Q_OFS = N_HID * N_IN + 4 * N_HID + 4 + 1     # 25,221
 WEIGHTS_SIZE = W2Q_OFS + N_OUT * N_HID + 4 * N_OUT     # 25,581
-# Functions of firmware/nn.c. Any of them on the call stack means we are inside nn_infer.
+# Functions of src/firmware/nn.c. Any of them on the call stack means we are inside nn_infer.
 NN_FUNCS = ("_nn_infer", "_layer1_neuron", "_requant", "_layer2_neuron")
 
 _MAP_LINE = re.compile(r"^(\w+)\s+= \$([0-9A-F]{4}) ; (\w+), ")
@@ -310,7 +310,7 @@ def flags(af):
     return "".join(c if f & (0x80 >> k) else "." for k, c in enumerate("SZ5H3PNC"))
 
 
-# --- Live view: file shared with the patched z88dk-ticks (tools/ticks-viz.patch) ----
+# --- Live view: file shared with the patched z88dk-ticks (src/tools/ticks-viz.patch) ----
 
 SHM_SIZE = 64 + 2 * 65536
 SHM_RAM, SHM_ACT = 64, 64 + 65536

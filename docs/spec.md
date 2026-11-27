@@ -1,64 +1,36 @@
 # MNIST on Z80 — Specification
 
-This document is the contract between the parts of the project. The Python pipeline defines what the correct answer is; the C code on the Z80 (emulated or real) must reproduce it **bit for bit**. When this document and the code disagree, fix one of them so they agree again.
+This document is the contract between the parts of the project. The Python pipeline defines what the correct answer is; the C code on the Z80, in the emulator or on the board it is intended for, must reproduce it **bit for bit**. When this document and the code disagree, fix one of them so they agree again.
 
-Sections 2–5 are **normative**: they define exactly what every implementation must compute and how files are laid out. So are the serial protocol (§7.5) and the live-view file (§7.7), which two programs must read the same way. The rest are implementation guides.
+Sections 1–4 are **normative**: they define exactly what every implementation must compute and how files are laid out. So are the serial protocol (§5.5) and the live-view file (§5.6), which two programs must read the same way. The rest are implementation guides. How to install, build and run everything is in the [README](../README.md) and the [guide](guide.md).
 
 ## Contents
 
-1. Repository layout
-2. The network
-3. Quantization scheme
-4. Integer inference algorithm (normative)
-5. Binary file formats (normative)
-6. Python pipeline
-7. C implementation
-8. Assembly (optional)
-9. Testing strategy
-10. Open points
+1. [The network](#1-the-network)
+2. [Quantization scheme](#2-quantization-scheme)
+   1. [Notation](#21-notation)
+   2. [Weights: symmetric per-layer quantization](#22-weights-symmetric-per-layer-quantization)
+   3. [Biases: the scale of the accumulator](#23-biases-the-scale-of-the-accumulator)
+   4. [Activations of layer 1](#24-activations-of-layer-1)
+   5. [Requantization constants `M0` and `shift`](#25-requantization-constants-m0-and-shift)
+   6. [Current values](#26-current-values)
+3. [Integer inference algorithm (normative)](#3-integer-inference-algorithm-normative)
+   1. [Value ranges (guaranteed)](#31-value-ranges-guaranteed)
+4. [Binary file formats (normative)](#4-binary-file-formats-normative)
+   1. [`weights.bin`](#41-weightsbin-25586-bytes)
+   2. [`testvec.bin`](#42-testvecbin-7--n--985-bytes)
+5. [C implementation](#5-c-implementation)
+   1. [Portability rules](#51-portability-rules)
+   2. [`nn.h`: interface](#52-srcfirmwarennh--interface)
+   3. [`nn.c`: inference](#53-srcfirmwarennc--inference)
+   4. [The Z80 programs](#54-the-z80-programs)
+   5. [`z80_serial_main.c`: firmware and serial protocol](#55-srcfirmwarez80_serial_mainc--firmware-and-serial-protocol)
+   6. [Debug panel and live-view file](#56-debug-panel-and-live-view-file)
+6. [Testing strategy](#6-testing-strategy)
 
 ---
 
-## 1. Repository layout
-
-```
-mnist-on-Z80/
-├── training/      train.py, quantize.py, reference.py, export.py
-├── firmware/      nn.h, nn.c                  inference library
-│                  z80_serial_main.c           the firmware: serial protocol (§7.5), emulator and board
-│                  snapregs.h, snapregs.c      register snapshot for the G command
-│                  z80_nn_main.c               one test case in DeZog (§9)
-│                  z80_test_main.c             toolchain sanity check
-├── host/          z80nn.py                    bridge to the Z80 (§7.6)
-│                  draw.py, demo.py            drawing window and demo
-│                  z80debug.py, debug_panel.py debug panel (§7.7)
-├── tests/         test_emu.py, test_z80debug.py, test_ticks_viz.py, test_preprocess.py,
-│                  make_dezog_inputs.py
-├── tools/         ticks-viz.patch             z88dk-ticks with a live view (§7.7)
-├── artifacts/     generated files, not committed (see .gitignore)
-│   ├── data/          MNIST, downloaded by torchvision
-│   ├── mlp.pt         float weights
-│   ├── quantized.npz  integer weights and constants
-│   ├── weights.bin    integer weights for the C code
-│   └── testvec.bin    test vectors for the C code
-├── build/         Z80 programs, DeZog inputs, build/ticks-viz; not committed
-├── docs/          this file, plan.md (historical), toolchain guide
-├── hardware/      photos, wiring notes
-├── Makefile
-└── README.md
-```
-
-| Folder | Runs on | Who uses it |
-| --- | --- | --- |
-| `training/` | Laptop, Python | Run once to produce `artifacts/` |
-| `firmware/` | Z80: `z88dk-ticks`, DeZog's zsim, or the board | The product |
-| `host/` | Laptop, Python | Talks to the Z80, emulated or real |
-| `tests/` | Laptop, pytest | Verifies `firmware/` and `host/` against `artifacts/testvec.bin` |
-| `tools/` | Laptop | Builds the patched emulator for the live debug view |
-
----
-
-## 2. The network
+## 1. The network
 
 | Item | Value |
 | --- | --- |
@@ -72,11 +44,13 @@ There is no normalization of the input: the network sees exactly the 0/1 values 
 
 ---
 
-## 3. Quantization scheme
+## 2. Quantization scheme
 
 All weights become integers; every scale factor is used only on the laptop.
 
-### 3.1 Notation
+`src/training/quantize.py` implements this section (`quantize_symmetric`, `choose_m0_shift`). It asserts the no-overflow condition and the integer types, then saves `W1q`, `b1q`, `W2q`, `b2q`, `M0` and `shift` (plus `s1`, `s2`, `s_h`, `h_max` and `bound` for diagnostics) to `artifacts/quantized.npz`.
+
+### 2.1 Notation
 
 | Symbol | Meaning |
 | --- | --- |
@@ -87,7 +61,7 @@ All weights become integers; every scale factor is used only on the laptop.
 
 The relation between a real value `v`, its scale `s` and its integer version `vq` is always `v ≈ s · vq`.
 
-### 3.2 Weights: symmetric per-layer quantization
+### 2.2 Weights: symmetric per-layer quantization
 
 For each weight matrix `W`:
 
@@ -98,7 +72,7 @@ Wq = clip(round(W / s), -127, 127)       stored as int8
 
 The value -128 is never used, so the range is symmetric and 0 maps exactly to 0.
 
-### 3.3 Biases: the scale of the accumulator
+### 2.3 Biases: the scale of the accumulator
 
 A bias is added to an accumulator, so it must be expressed in the accumulator's units. It is **not** quantized with its own scale.
 
@@ -109,7 +83,7 @@ A bias is added to an accumulator, so it must be expressed in the accumulator's 
 
 Biases are stored as int32 and are **not** clipped.
 
-### 3.4 Activations of layer 1
+### 2.4 Activations of layer 1
 
 The scale of the hidden activations is calibrated on the **training set** (never on the test set):
 
@@ -118,7 +92,7 @@ h_max = max over all training images of ReLU(W1 · x + b1)     (float)
 s_h   = h_max / 127
 ```
 
-### 3.5 Requantization constants `M0` and `shift`
+### 2.5 Requantization constants `M0` and `shift`
 
 Between the layers, `acc1` (units of `s1`) must be converted to units of `s_h`, i.e. multiplied by `M = s1 / s_h`. The Z80 has no floats, so `M` is approximated as:
 
@@ -140,7 +114,7 @@ bound = max over neurons j of ( b1q[j] + sum of the positive entries of W1q[j] )
 
 This is a proof, not a measurement: the worst image turns on exactly the pixels with positive weight.
 
-### 3.6 Current values
+### 2.6 Current values
 
 These change every time the network is retrained. They are printed by `quantize.py` and `reference.py`.
 
@@ -163,9 +137,9 @@ These change every time the network is retrained. They are printed by `quantize.
 
 ---
 
-## 4. Integer inference algorithm (normative)
+## 3. Integer inference algorithm (normative)
 
-Every implementation (`reference.py`, `nn.c`, and any assembly) must compute exactly these values.
+Every implementation (`reference.py` and `nn.c`) must compute exactly these values. `infer_int()` in `src/training/reference.py` is the executable form of this section; it processes **one** image on purpose, to mirror the C code step by step.
 
 **Input**: `x[784]`, each 0 or 1.
 
@@ -178,7 +152,7 @@ Every implementation (`reference.py`, `nn.c`, and any assembly) must compute exa
    ```
    h_q[j] = min(127, (r · M0 + 2^(shift-1)) >> shift)                     (0..127)
    ```
-   `r · M0` is computed in 32-bit signed arithmetic; the condition of §3.5 guarantees no overflow. `r ≥ 0`, so the right shift is a division rounded down. Adding `2^(shift-1)` first turns it into rounding to nearest.
+   `r · M0` is computed in 32-bit signed arithmetic; the condition of §2.5 guarantees no overflow. `r ≥ 0`, so the right shift is a division rounded down. Adding `2^(shift-1)` first turns it into rounding to nearest.
 4. **Layer 2**, for each digit `k` in 0..9:
    ```
    acc2[k] = b2q[k] + sum over j of W2q[k][j] · h_q[j]                     (int32)
@@ -186,7 +160,7 @@ Every implementation (`reference.py`, `nn.c`, and any assembly) must compute exa
    Each product fits in 16 bits: |W2q · h_q| ≤ 127 · 127 = 16,129.
 5. **Argmax**: the result is the smallest `k` such that `acc2[k]` is maximal (**ties go to the lowest index**, like `numpy.argmax`). In C this means comparing with a strict `>`.
 
-### 4.1 Value ranges (guaranteed)
+### 3.1 Value ranges (guaranteed)
 
 | Value | Range | Type |
 | --- | --- | --- |
@@ -200,11 +174,11 @@ Every implementation (`reference.py`, `nn.c`, and any assembly) must compute exa
 
 ---
 
-## 5. Binary file formats (normative)
+## 4. Binary file formats (normative)
 
-Produced by `training/export.py`. All multi-byte integers are **little-endian** (least significant byte first), the byte order of the Z80. Two-dimensional arrays are stored **row by row**, which is also how C lays out `int8_t a[R][C]` in memory.
+Produced by `src/training/export.py`, which refuses to convert any value outside its type's range (numpy's `astype` would wrap silently), then reads both files back and compares every value. All multi-byte integers are **little-endian** (least significant byte first), the byte order of the Z80. Two-dimensional arrays are stored **row by row**, which is also how C lays out `int8_t a[R][C]` in memory.
 
-### 5.1 `weights.bin` (25,586 bytes)
+### 4.1 `weights.bin` (25,586 bytes)
 
 | Offset | Size (bytes) | Field | Type | Content |
 | --- | --- | --- | --- | --- |
@@ -217,9 +191,9 @@ Produced by `training/export.py`. All multi-byte integers are **little-endian** 
 | 25,226 | 320 | `W2q` | int8 [10][32] | Digit 0's 32 weights first |
 | 25,546 | 40 | `b2q` | int32 [10] | |
 
-The **payload** is everything after the 5-byte header (offsets 5..25,585, 25,581 bytes). It is what the serial protocol transfers (§7.5).
+The **payload** is everything after the 5-byte header (offsets 5..25,585, 25,581 bytes). It is what the serial protocol transfers (§5.5).
 
-### 5.2 `testvec.bin` (7 + n · 985 bytes)
+### 4.2 `testvec.bin` (7 + n · 985 bytes)
 
 Header:
 
@@ -239,58 +213,19 @@ Then `n` records of 985 bytes each:
 | 40 | `acc2` | int32 [10] | |
 | 1 | `digit` | uint8 | Result of the integer network, **not** the MNIST label |
 
-Current content: 105 cases — the first 100 test-set images, then `all_black`, `all_white`, `only_pixel_0`, `only_pixel_783`, and `worst_neuron_N` (the image that drives neuron N to exactly `bound`).
+Current content: 105 cases — the first 100 test-set images, then `all_black`, `all_white`, `only_pixel_0`, `only_pixel_783`, and `worst_neuron_N` (the image that drives neuron N to exactly `bound`; `export.py` checks that it does).
 
 ---
 
-## 6. Python pipeline
+## 5. C implementation
 
-Run from the repository root, in this order:
+### 5.1 Portability rules
 
-```
-python training/train.py       # -> artifacts/mlp.pt
-python training/quantize.py    # -> artifacts/quantized.npz
-python training/reference.py   # prints accuracies
-python training/export.py      # -> artifacts/weights.bin, artifacts/testvec.bin
-```
-
-### 6.1 `train.py`
-
-Defines `MLP` (an `nn.Sequential` of `Flatten`, `Linear(784, 32)`, `ReLU`, `Linear(32, 10)`, so the linear layers are `layers[1]` and `layers[3]`) and `get_data()`, which returns binarized train and test datasets and loaders. Trains for 10 epochs and saves the `state_dict` to `artifacts/mlp.pt`. Also defines the paths used by every other script (`DATA_DIR`, `WEIGHTS_PATH`).
-
-### 6.2 `quantize.py`
-
-Implements §3: quantizes the weights (`quantize_symmetric`), calibrates `h_max` on the training set, computes `bound`, and chooses `M0` and `shift` (`choose_m0_shift`). Asserts the no-overflow condition and the integer types, then saves `W1q`, `b1q`, `W2q`, `b2q`, `M0`, `shift` (plus `s1`, `s2`, `s_h`, `h_max`, `bound` for diagnostics) to `artifacts/quantized.npz`.
-
-### 6.3 `reference.py`
-
-The executable form of §4.
-
-| Function | Purpose |
-| --- | --- |
-| `load_quantized(path)` | Loads `quantized.npz`; arrays as int64, scalars as Python numbers |
-| `load_test_images()` | Test set as an int64 array (10000, 784) of 0/1, plus labels |
-| `infer_int(x, q)` | One image → `(digit, acc1, h_q, acc2)`, integers only |
-| `load_float_model()` | The float PyTorch model, for comparison |
-| `evaluate(images, labels, q)` | Accuracies, agreement, saturation rate, largest `acc1` |
-
-`infer_int` processes **one** image on purpose: it mirrors the C code step by step.
-
-### 6.4 `export.py`
-
-Implements §5. Writes both files, refuses to convert any value outside its type's range (numpy's `astype` would wrap silently), reads both files back and compares every value. Also checks that the `worst_neuron_N` image reaches exactly `bound`.
-
----
-
-## 7. C implementation
-
-### 7.1 Portability rules
-
-`nn.c` is compiled by z88dk (sdcc) for the Z80, where `int` is **16 bits**. It is written in plain C99 so that it would also compile unchanged on a laptop, where `int` is 32 bits; code that works there can silently fail on the Z80. These rules apply to every C file in `firmware/`:
+`nn.c` is compiled by z88dk (sdcc) for the Z80, where `int` is **16 bits**. It is written in plain C99 so that it would also compile unchanged on a laptop, where `int` is 32 bits; code that works there can silently fail on the Z80. These rules apply to every C file in `src/firmware/`:
 
 1. **Use only fixed-width types** from `<stdint.h>` for data: `int8_t`, `uint8_t`, `int16_t`, `uint16_t`, `int32_t`. Use plain `int` only where the value is guaranteed to fit in 16 bits.
 2. **Never shift an untyped constant into the upper bits.** Write `(int32_t)1 << (shift - 1)`, never `1 << (shift - 1)`: on the Z80 the second form is undefined behavior for `shift > 15`.
-3. **No signed overflow.** Every accumulator is `int32_t`, and §4.1 proves the ranges.
+3. **No signed overflow.** Every accumulator is `int32_t`, and §3.1 proves the ranges.
 4. **Loop indices must fit their range.** A loop to 784 needs `uint16_t`; `uint8_t` wraps at 256 and the loop never ends.
 5. **Right shift only non-negative values.** Shifting a negative number right is implementation-defined. The requantization only shifts after the ReLU.
 6. **Casts in products**: write `(int16_t)a * (int16_t)b` in layer 2 so the compiler uses a 16-bit multiplication.
@@ -299,7 +234,7 @@ Implements §5. Writes both files, refuses to convert any value outside its type
 9. **No `printf`.** The firmware prints numbers with its own `put_hex4`/`put_i32`: smaller, and no `%ld` support to configure.
 10. **`nn.c` does no I/O**: it does not include `<stdio.h>`. All input/output lives in the `z80_*_main.c` files.
 
-### 7.2 `firmware/nn.h` — interface
+### 5.2 `src/firmware/nn.h` — interface
 
 ```c
 #ifndef NN_H
@@ -339,9 +274,9 @@ uint8_t nn_infer(const struct nn_weights *w,
 | `w` | Pointer to the weights. Not modified |
 | `x` | 784 pixels, each 0 or 1. Not modified |
 | `trace` | Where to store the intermediate values, or `NULL` if they are not needed |
-| return value | The digit, 0..9, as defined in §4 |
+| return value | The digit, 0..9, as defined in §3 |
 
-With sdcc the struct has **no padding** (no field needs alignment on the Z80), so it has exactly the layout of the `weights.bin` payload (§5.1). The firmware relies on this and copies the payload into it byte for byte; both `z80_serial_main.c` and `z80_nn_main.c` check it at compile time:
+With sdcc the struct has **no padding** (no field needs alignment on the Z80), so it has exactly the layout of the `weights.bin` payload (§4.1). The firmware relies on this and copies the payload into it byte for byte; both `z80_serial_main.c` and `z80_nn_main.c` check it at compile time:
 
 ```c
 _Static_assert(sizeof(struct nn_weights) == 25581, "nn_weights layout != weights.bin payload");
@@ -349,15 +284,15 @@ _Static_assert(sizeof(struct nn_weights) == 25581, "nn_weights layout != weights
 
 A compiler that pads the struct fails to build instead of computing wrong results.
 
-### 7.3 `firmware/nn.c` — inference
+### 5.3 `src/firmware/nn.c` — inference
 
 Four functions; the first three are `static` (private to the file).
 
 | Function | Computes | Notes |
 | --- | --- | --- |
-| `layer1_neuron(row, bias, x)` | `acc1[j]` (§4 step 1) | Adds `row[i]` when `x[i] != 0`. Index is `uint16_t` |
-| `requant(acc, M0, shift)` | `h_q[j]` (§4 steps 2–3) | ReLU first; `(int32_t)1 << (shift - 1)`; clamp to 127 |
-| `layer2_neuron(row, bias, h_q)` | `acc2[k]` (§4 step 4) | `(int16_t)` casts on both factors |
+| `layer1_neuron(row, bias, x)` | `acc1[j]` (§3 step 1) | Adds `row[i]` when `x[i] != 0`. Index is `uint16_t` |
+| `requant(acc, M0, shift)` | `h_q[j]` (§3 steps 2–3) | ReLU first; `(int32_t)1 << (shift - 1)`; clamp to 127 |
+| `layer2_neuron(row, bias, h_q)` | `acc2[k]` (§3 step 4) | `(int16_t)` casts on both factors |
 | `nn_infer(w, x, trace)` | Everything | Strict `>` in the argmax; fills `trace` only if not `NULL` |
 
 Pseudocode of `nn_infer`:
@@ -375,14 +310,14 @@ if trace != NULL: copy acc1, h_q, acc2 into trace
 return best
 ```
 
-### 7.4 The Z80 programs
+### 5.4 The Z80 programs
 
 | Program | Built by | Runs in | Input and output |
 | --- | --- | --- | --- |
-| `z80_serial_main.c` | `make emu` → `build/emu.bin` | `z88dk-ticks` | The line protocol (§7.5) on the console: `fgetc_cons()`/`fputc_cons()` |
+| `z80_serial_main.c` | `make emu` → `build/emu.bin` | `z88dk-ticks` | The line protocol (§5.5) on the console: `fgetc_cons()`/`fputc_cons()` |
 | `z80_serial_main.c` | `make rom` → `build/board.rom` | The board, or `z88dk-ticks` | The same protocol through the MC6850 ACIA at ports `0x80`/`0x81` |
-| `z80_nn_main.c` | `make inputs firmware` → `build/firmware_*.bin` | DeZog (zsim) | One test case loaded at `0x7800`, result in the mailbox at `0xF000` (§9) |
-| `z80_test_main.c` | `make firmware FW=firmware/z80_test_main.c` | DeZog (zsim) | Writes a fixed value to the mailbox: checks the toolchain |
+| `z80_nn_main.c` | `make inputs firmware` → `build/firmware_*.bin` | DeZog (zsim) | One test case loaded at `0x7800`, result in the mailbox at `0xF000` (§6) |
+| `z80_test_main.c` | `make firmware FW=src/firmware/z80_test_main.c` | DeZog (zsim) | Writes a fixed value to the mailbox: checks the toolchain |
 
 Build flags (see the `Makefile`; every build also writes a `.map` file with `-m`):
 
@@ -390,20 +325,20 @@ Build flags (see the `Makefile`; every build also writes a `.map` file with `-m`
 | --- | --- | --- |
 | `emu` | `+test -compiler=sdcc` | 64 KB of RAM. Code from `0x0000` (to about `0x10E8`), variables to about `0x7BE3`, stack below `0xFF00` |
 | `rom` | `+z80 -compiler=sdcc -pragma-define:CRT_ENABLE_EIDI=0x01 -create-app` | Code in ROM from `0x0000` (about 3.9 KB). Variables in RAM from `0x8000` (weights, buffers and `stack_copy`, to about `0xEA97`), stack below `0xFFFF`. `-create-app` writes `build/board.rom`, the file for the EEPROM. Interrupts stay off: the ACIA is polled |
-| `firmware` | `+z80 -compiler=sdcc -m --list --c-code-in-asm -pragma-define:CRT_MODEL=0` | Code from `0x0000` (below `0x1000`), weights loaded at `0x1000`, test case at `0x7800`, variables from `0x8000`, mailbox `0xF000`. `--list` writes the `firmware/*.lis` listings DeZog uses for source-level debugging |
+| `firmware` | `+z80 -compiler=sdcc -m --list --c-code-in-asm -pragma-define:CRT_MODEL=0` | Code from `0x0000` (below `0x1000`), weights loaded at `0x1000`, test case at `0x7800`, variables from `0x8000`, mailbox `0xF000`. `--list` writes the `src/firmware/*.lis` listings DeZog uses for source-level debugging |
 
 Check the `.map` file after a change that adds data: the variables and the stack must not meet. The addresses above move with every change; the `.map` is the reference, and the debug panel reads it.
 
-### 7.5 `firmware/z80_serial_main.c` — firmware and serial protocol
+### 5.5 `src/firmware/z80_serial_main.c` — firmware and serial protocol
 
-The firmware is an endless loop: read one line, execute the command, reply with one or more lines. The same source is built for the emulator and for the board (§7.4); only its three character functions `ser_init`, `ser_getc`, `ser_putc` differ. The weights live in a global `struct nn_weights` in RAM, so they are uploaded again every time the program starts.
+The firmware is an endless loop: read one line, execute the command, reply with one or more lines. The same source is built for the emulator and for the board (§5.4); only its three character functions `ser_init`, `ser_getc`, `ser_putc` differ. The weights live in a global `struct nn_weights` in RAM, so they are uploaded again every time the program starts.
 
 **Line format**:
 
 - Commands are ASCII lines terminated by `\n`. A `\r` before it is ignored.
-- Bytes are encoded as **two hexadecimal digits** (`00`..`FF`); upper and lower case are both accepted on input, the board replies in upper case.
+- Bytes are encoded as **two hexadecimal digits** (`00`..`FF`); upper and lower case are both accepted on input, the firmware replies in upper case.
 - The receive buffer holds 198 characters, the longest valid line (`I ` + 196 hex digits). A longer line is discarded and answered with `ERR LONG`.
-- At end of input (the emulator's stdin closed) `build/emu.bin` exits. The board keeps polling, and so does `build/board.rom` in plain `z88dk-ticks`, which then gives it `0xFF` bytes forever; with `-shm` the patched ticks exits instead (§7.7).
+- At end of input (the emulator's stdin closed) `build/emu.bin` exits. The board keeps polling, and so does `build/board.rom` in plain `z88dk-ticks`, which then gives it `0xFF` bytes forever; with `-shm` the patched ticks exits instead (§5.6).
 
 **Commands**:
 
@@ -417,7 +352,7 @@ The firmware is an endless loop: read one line, execute the command, reply with 
 | `G` | — | `G af bc de hl ix iy sp pc af' bc' de' hl' i r` | Registers, 4 hex digits each (`i`, `r`: 2), snapped by `snap_regs()` right after `nn_infer` returns in the last `I`/`D`; all zero before the first one. PC is the return address of that call, inside `cmd_infer`. The same `I`/`D` copies the 256 bytes from that SP into `stack_copy` (read it with `M`): `G` and `M` reuse that stack area for their own frames |
 | `M` | `aaaa` + space + `nn` | `M` + space + `2·nn` hex digits, or `ERR <reason>` | Reads `nn` bytes (`01`..`40` hex) from address `aaaa`; the address wraps at `FFFF`. `nn` = `00` or above `40` is `ERR LEN` |
 
-**Weights transfer**: the payload of `weights.bin` (§5.1, without the 5-byte header) is sent in 64-byte chunks: 399 full lines plus one line of 45 bytes, offsets `0000`, `0040`, `0080`, … The firmware copies each chunk to `(uint8_t *)&weights + offset`: the struct has the payload's layout (§7.2), and the Z80 is little-endian like the file, so no field needs decoding. A chunk that would end past byte 25,581 is `ERR OFS`.
+**Weights transfer**: the payload of `weights.bin` (§4.1, without the 5-byte header) is sent in 64-byte chunks: 399 full lines plus one line of 45 bytes, offsets `0000`, `0040`, `0080`, … The firmware copies each chunk to `(uint8_t *)&weights + offset`: the struct has the payload's layout (§5.2), and the Z80 is little-endian like the file, so no field needs decoding. A chunk that would end past byte 25,581 is `ERR OFS`.
 
 **Checksum**: the sum of all 25,581 payload bytes, as unsigned bytes, modulo 65,536, printed as 4 upper-case hex digits. The host computes the same value and compares.
 
@@ -429,40 +364,11 @@ The firmware is an endless loop: read one line, execute the command, reply with 
 
 **Input without echo**: the emulator build reads with `fgetc_cons()`, which does not echo (unlike `getchar()`); the board build reads the ACIA data register directly.
 
-**Debug commands** `G` and `M` serve the debug panel (§7.7) in snapshot mode. They cost about 460 bytes of ROM (`board.rom` grew from 3,511 to 3,970 bytes) and 282 bytes of RAM (`regs`, `stack_copy`).
+**Debug commands** `G` and `M` serve the debug panel (§5.6) in snapshot mode. They cost about 460 bytes of ROM (`board.rom` grew from 3,511 to 3,970 bytes) and 282 bytes of RAM (`regs`, `stack_copy`).
 
-### 7.6 `host/z80nn.py` — the bridge, and the `Makefile`
+### 5.6 Debug panel and live-view file
 
-`Z80NN(target, where)` hides where the Z80 is; `version()`, `load_weights()`, `classify()`, `classify_debug()`, `registers()` and `read_memory()` then work the same everywhere.
-
-| `target` | `where` | Connection |
-| --- | --- | --- |
-| `emu` | `build/emu.bin` or `build/board.rom` | Starts `z88dk-ticks -counter 100000000000` on it (ticks otherwise stops after 10^8 T-states, about 10 classifications), stdin a pipe, stdout a pseudo-terminal. Optional `ticks=` (another emulator binary) and `shm=` (the live-view file, §7.7) |
-| `board` | serial port | 115,200 baud, 8N1, RTS/CTS, 5 s timeout (`pyserial`) |
-| `local` | a program on the laptop | Its stdin/stdout |
-
-`close()` closes the input; a program that does not exit within 2 s is killed. That happens to `board.rom` in plain ticks, which never sees the end of input (§7.5); with `-shm` ticks exits at once.
-
-**Makefile targets**:
-
-| Target | Effect |
-| --- | --- |
-| `make` (`all`) | Missing artifacts, DeZog inputs, and the `firmware`, `emu` and `rom` builds |
-| `make train` | Retrain from scratch, then quantize and export again |
-| `make check` | `reference.py`: float vs integer accuracy |
-| `make test` | Builds `emu`, `rom` and, when z88dk's sources are there, `ticks-viz`; then pytest, listing the reason of every skipped test |
-| `make emu` / `make rom` | `build/emu.bin` / `build/board.rom` (§7.4) |
-| `make firmware` | `build/firmware_*` for DeZog; `FW=` picks another source |
-| `make inputs CASE=n` | `build/weights_payload.bin` and `build/case.bin` for DeZog |
-| `make ticks-viz` | The patched emulator in `build/ticks-viz` (§7.7) |
-| `make demo` | Builds `rom` and runs the drawing demo on the emulator with `build/board.rom` (`host/demo.py`'s default, map `build/board.map`); `PORT=…` on the board, `DEBUG=1` with the debug panel there |
-| `make clean` | Removes `build/` (including `build/ticks-viz`) and the listings; `artifacts/` stay |
-
-`PYTHON` defaults to `.venv/bin/python` when that exists, else `python`. Recipe lines start with a **TAB**.
-
-### 7.7 Debug panel and live-view file
-
-`host/debug_panel.py` shows registers, call stack, stack, memory and memory accesses of the running Z80. It gets them from one of two sources in `host/z80debug.py`, which have the same `capture(view_addr)`:
+`src/host/debug_panel.py` shows registers, call stack, stack, memory and memory accesses of the running Z80. It gets them from one of two sources in `src/host/z80debug.py`, which have the same `capture(view_addr)`:
 
 | Source | Used for | How |
 | --- | --- | --- |
@@ -471,7 +377,7 @@ The firmware is an endless loop: read one line, execute the command, reply with 
 
 Symbols and memory-map blocks come from the program's `.map` file (`MapSymbols`). The call stack follows SDCC's frame chain: a function that uses a frame does `push ix; ld ix,0; add ix,sp`, so `(IX)` is the caller's IX and `(IX+2)` the return address. SP and IX can be odd (SDCC sometimes pushes single bytes), so words are read at any offset.
 
-**Live-view file** (normative between `tools/ticks-viz.patch` and `LiveSource`). `z88dk-ticks -shm <file>` creates `<file>` (131,136 bytes) and maps it shared; the host maps it too. Little-endian, the host's byte order:
+**Live-view file** (normative between `src/tools/ticks-viz.patch` and `LiveSource`). `z88dk-ticks -shm <file>` creates `<file>` (131,136 bytes) and maps it shared; the host maps it too. Little-endian, the host's byte order:
 
 | Offset | Size | Field | Written by |
 | --- | --- | --- | --- |
@@ -497,35 +403,11 @@ Rules:
 - Only the standard 64 KB memory model maps its RAM into the file.
 - Without `-shm`, the patched ticks behaves exactly like the original.
 
-The patch (`tools/ticks-viz.patch`) adds `viz.h`/`viz.c` and hooks in `memory.c`, `ticks.c` (the CPU loop), `ticks_main.c` (the option), `hook_console.c` (before blocking reads), `acia.c` (exit at end of input) and the `Makefile`. `make ticks-viz` applies it to a copy of the installed z88dk's `src/ticks` in `build/ticks-viz`; the installed z88dk is not changed.
+The patch (`src/tools/ticks-viz.patch`) adds `viz.h`/`viz.c` and hooks in `memory.c`, `ticks.c` (the CPU loop), `ticks_main.c` (the option), `hook_console.c` (before blocking reads), `acia.c` (exit at end of input) and the `Makefile`. `make ticks-viz` applies it to a copy of the installed z88dk's `src/ticks` in `build/ticks-viz`; the installed z88dk is not changed.
 
 ---
 
-## 8. Assembly (optional)
-
-Assembly is **not** required. It belongs to the optimization phase, after the C version passes all tests on the board.
-
-**Rules**:
-
-1. **Keep the C version.** The assembly replaces one function behind a compile-time switch, so both can be built and compared.
-2. **Same contract, same tests.** The assembly function must make `make test` pass with 105/105 exactly like the C one.
-3. **Measure before and after** with `z88dk-ticks` (it prints the T-states at exit; `-start`/`-end` limit the count to a PC range) and record both, for example in a `docs/measurements.md`.
-4. **Start from the compiler's output** (`--list`) for the same function and improve it, instead of writing from scratch.
-5. **Calling convention**: how arguments reach an assembly function depends on the compiler and its options. Check the z88dk documentation for sdcc's convention (`-compiler=sdcc`, the classic library used here) before writing any code.
-
-**Candidates**, in order of expected benefit:
-
-| Candidate | Idea |
-| --- | --- |
-| Layer 1 inner loop | It is ~99% of the work. Best combined with a **transposed** `W1q` (784 rows × 32): for each lit pixel, add its 32 weights to 32 accumulators |
-| 16-bit accumulators | Accumulate at most 257 lit pixels in `int16_t` (127 · 257 = 32,639 fits), then add to `int32_t` |
-| Layer-2 multiplication | Quarter-square table: `a · b = ⌊(a+b)²/4⌋ − ⌊(a−b)²/4⌋`, exact for integers |
-
-Changing the layout of `W1q` changes §5: bump the file format **version** to 2, update `export.py`, `nn.h`/`nn.c`, `z80nn.py` (it checks the version) and `tests/make_dezog_inputs.py` together, and update this document.
-
----
-
-## 9. Testing strategy
+## 6. Testing strategy
 
 The same 105 cases of `testvec.bin` are the reference at every level.
 
@@ -534,37 +416,8 @@ The same 105 cases of `testvec.bin` are the reference at every level.
 | 1. Python | `make check`, and `export.py`'s read-back | The integer reference agrees with the float model; the files hold exactly what `infer_int` computes |
 | 2. Emulator | `make test` | `nn.c` is right with 16-bit `int`, in both builds (`emu.bin` and the EEPROM image `board.rom`); the protocol, the debug commands, the debug panel's sources and the patched ticks work |
 | 3. Step by step | DeZog, launch config "Z80 zsim" | One case (`make inputs CASE=n firmware`) with breakpoints; the mailbox reports the first mismatch |
-| 4. Board | `make demo PORT=…` | The hardware, the ROM and the serial link: connection, weight upload with checksum, classifications |
+| 4. Board | `make demo PORT=…` | Intended for the board: the ROM and the serial link, through the connection, the weight upload with its checksum, and classifications |
 
-**Acceptance**: 105/105 at level 2, every intermediate value identical.
-
-**Tests** (`tests/`):
-
-| File | Checks |
-| --- | --- |
-| `test_emu.py` | All 105 cases with `D` on both builds, `I` agreeing with `D`, every error reply, `G` (PC inside `cmd_infer`, SP in the stack, `stack_copy` holding the return address into `main`) and `M` (the weights, the unpacked image, wrap-around) |
-| `test_z80debug.py` | The `.map` parser on both builds, flag decoding, snapshots on both builds, `draw.Worker` |
-| `test_ticks_viz.py` | The patched ticks with `-shm` on both builds: the 105 cases, accesses (upload, layer 1 reading exactly the rows of lit pixels, no instruction fetched from data), the call stack mid-inference, the clock and Pause. Skipped without `make ticks-viz` |
-| `test_preprocess.py` | The drawing preprocessing of `host/draw.py` |
+**Acceptance**: 105/105 at level 2, every intermediate value identical. What each test file checks is listed in the [guide, section 7](guide.md#7-tests).
 
 **Mutation check**: temporarily introduce a known bug (for example `>=` instead of `>` in the argmax, or remove the `(int32_t)` cast in `requant`), confirm that `make test` fails, then undo it.
-
-**Host side** (`host/`): `z80nn.py` (§7.6); `draw.py`, the drawing window and MNIST-style preprocessing (crop to the bounding box, longest side to 20 px, center of mass at (14, 14) in 28 × 28, the training threshold); `demo.py`, which joins them and sends images with `I`, or `D` with the debug panel (§7.7).
-
----
-
-## 10. Open points
-
-Resolved:
-
-- [x] Output file of `-create-app`: `build/board.rom`, written to the EEPROM (§7.4).
-- [x] Echo and line buffering: `fgetc_cons()` on the emulator, the ACIA polled directly on the board (§7.5).
-- [x] Cycle count: `z88dk-ticks` prints the T-states at exit; `-start`/`-end` limit the count (§8).
-- [x] Memory: code, weights and stack fit in both builds (§7.4).
-
-Open:
-
-- [ ] Run the 105 cases on the real board (level 4 only classifies drawn digits). `Z80NN("board", port)` already supports everything `test_emu.py` uses.
-- [ ] sdcc's calling convention between C and assembly, before writing any assembly (§8).
-- [ ] Searle's schematic: exact 74HC chips, RTS/CTS wiring, ACIA interrupt line to `/INT`.
-- [ ] `tools/ticks-viz.patch` is made for the z88dk sources installed now; a newer z88dk may need it updated.

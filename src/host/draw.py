@@ -1,7 +1,7 @@
 """
 draw.py - Draw a digit with the mouse and turn it into the network's input.
 
-preprocess() does what MNIST did (docs/spec.md, sections 2 and 9): crop to the
+preprocess() does what MNIST did (input format: docs/spec.md §1): crop to the
 bounding box, scale the longest side to 20 px, center the mass at (14, 14) in
 a 28x28 frame, binarize. The result is the 784-value 0/1 vector the Z80 expects.
 
@@ -9,7 +9,7 @@ DrawingApp knows nothing about the Z80. demo.py passes it a callback that
 classifies the image, and the callback runs in a background thread (Worker)
 so the window stays responsive.
 
-Run `python host/draw.py` to print the preprocessed image in the terminal.
+Run `python src/host/draw.py` to print the preprocessed image in the terminal.
 """
 
 import queue

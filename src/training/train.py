@@ -15,7 +15,7 @@ from torchvision import datasets
 from torchvision.transforms import Compose, Lambda, ToTensor
 
 # --- Paths ------------------------------------------------------------------
-ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 ARTIFACTS_DIR = os.path.join(ROOT_DIR, "artifacts")
 DATA_DIR = os.path.join(ARTIFACTS_DIR, "data")
 MODEL_DIR = ARTIFACTS_DIR

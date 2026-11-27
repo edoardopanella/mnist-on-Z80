@@ -21,8 +21,8 @@ import numpy as np
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "host"))
-sys.path.insert(0, os.path.join(ROOT, "training"))
+sys.path.insert(0, os.path.join(ROOT, "src", "host"))
+sys.path.insert(0, os.path.join(ROOT, "src", "training"))
 from z80debug import PROG, READ, WRITE, LiveSource, MapSymbols, infer_step  # noqa: E402
 from z80nn import Z80NN  # noqa: E402
 
@@ -224,7 +224,7 @@ def test_pause_stops_between_instructions(live):
 # (kbhit() returns -1, which is true), so the firmware's polling loop goes on to
 # the data read, which blocks in getch() and publishes first. A z88dk whose
 # status read says "empty" would make the firmware spin instead, using a full
-# core: test_board_rom_waits_without_running is the guard (docs/spec.md §7.7).
+# core: test_board_rom_waits_without_running is the guard (docs/spec.md §5.6).
 
 @pytest.fixture
 def board_rom():

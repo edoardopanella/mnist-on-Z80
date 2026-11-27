@@ -1,5 +1,5 @@
 """
-z80nn.py - Host side of the line protocol (firmware/z80_serial_main.c).
+z80nn.py - Host side of the line protocol (src/firmware/z80_serial_main.c).
 
 Z80NN sends weights, images and debug commands to a native build, the
 emulator or the board, and parses the replies.
@@ -13,7 +13,7 @@ import tty
 
 import numpy as np
 
-# Order of the G reply, same as struct regs in firmware/snapregs.h
+# Order of the G reply, same as struct regs in src/firmware/snapregs.h
 REG_NAMES = ["af", "bc", "de", "hl", "ix", "iy", "sp", "pc", "af2", "bc2", "de2", "hl2", "i", "r"]
 MAX_CHUNK = 64      # bytes per W or M line
 

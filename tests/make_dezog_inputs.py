@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 ART = ROOT / "artifacts"
 OUT = ROOT / "build"
-REC = 985  # x (784) + acc1 (128) + h_q (32) + acc2 (40) + digit (1), spec §5.2
+REC = 985  # x (784) + acc1 (128) + h_q (32) + acc2 (40) + digit (1), spec §4.2
 
 w = (ART / "weights.bin").read_bytes()
 assert w[:4] == b"Z8NN" and w[4] == 1 and len(w) == 25586, "unexpected weights.bin"

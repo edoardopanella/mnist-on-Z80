@@ -1,10 +1,10 @@
 """
 demo.py - Draw a digit and let the Z80 classify it.
 
-    python host/demo.py                          emulator: build/board.rom in z88dk-ticks (make rom)
-    python host/demo.py emu build/emu.bin        emulator: the console build (make emu)
-    python host/demo.py board /dev/tty.usbserial-XXXX    the board, over serial
-    python host/demo.py board /dev/tty.usbserial-XXXX --debug    the board, with the debug panel
+    python src/host/demo.py                          emulator: build/board.rom in z88dk-ticks (make rom)
+    python src/host/demo.py emu build/emu.bin        emulator: the console build (make emu)
+    python src/host/demo.py board /dev/tty.usbserial-XXXX    the board, over serial
+    python src/host/demo.py board /dev/tty.usbserial-XXXX --debug    the board, with the debug panel
 
 Uploads artifacts/weights.bin, then opens draw.DrawingApp. Each "Recognize"
 sends the image and shows the digit the Z80 returns.
@@ -27,7 +27,7 @@ import tempfile
 from draw import DrawingApp
 from z80nn import Z80NN
 
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))  # repo root
 WEIGHTS = os.path.join(ROOT, "artifacts", "weights.bin")
 BOARD_ROM = os.path.join(ROOT, "build", "board.rom")
 BOARD_MAP = os.path.join(ROOT, "build", "board.map")

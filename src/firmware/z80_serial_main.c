@@ -1,4 +1,4 @@
-/* Line-protocol firmware (docs/spec.md §7.5), the Z80 side of host/z80nn.py.
+/* Line-protocol firmware (docs/spec.md §5.5), the Z80 side of src/host/z80nn.py.
  *
  * One command per line, one reply per command (D replies with four lines):
  *   V                  -> "Z80NN 2"

@@ -1,4 +1,4 @@
-"""End-to-end tests: host/z80nn.py talking to firmware/z80_serial_main.c in z88dk-ticks.
+"""End-to-end tests: src/host/z80nn.py talking to src/firmware/z80_serial_main.c in z88dk-ticks.
 
 Every case in artifacts/testvec.bin must match exactly (acc1, h_q, acc2, digit).
 Runs on both builds, and skips the ones that are missing:
@@ -14,8 +14,8 @@ import sys
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(ROOT, "host"))
-sys.path.insert(0, os.path.join(ROOT, "training"))
+sys.path.insert(0, os.path.join(ROOT, "src", "host"))
+sys.path.insert(0, os.path.join(ROOT, "src", "training"))
 from z80nn import Z80NN  # noqa: E402
 
 EMU_BIN = os.path.join(ROOT, "build", "emu.bin")
