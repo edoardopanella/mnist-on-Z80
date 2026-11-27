@@ -9,7 +9,10 @@ The result is the 784-value 0/1 vector the Z80 expects (pixel i = 28*row + col).
 DrawingApp is independent of the Z80: host/demo.py passes a callback that
 sends the image to the board and returns the digit. The callback runs in a
 background thread (Worker), so the window keeps redrawing while the Z80 works;
-an optional side panel (host/debug_panel.py) uses the same thread.
+an optional side panel (host/debug_panel.py) uses the same thread, and an
+optional widget under the buttons (host/network_view.py) follows each digit.
+With either of them, the part under the mouse is put in focus and the others
+fade (host/focus.py); a "Focus on hover" checkbox turns it off.
 With on_stop, a slow classification can be stopped: its answer is dropped,
 and a digit asked for meanwhile runs next.
 
@@ -19,19 +22,22 @@ Run `python host/draw.py` to check the preprocessing by eye in the terminal.
 import queue
 import threading
 import tkinter as tk
+from tkinter import font as tkfont
+from tkinter import ttk
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageTk
 
-CANVAS_SIZE = 280          # drawing area, 10x the MNIST frame
-BRUSH_RADIUS = 10          # px on the canvas
+CANVAS_SIZE = 300          # drawing area, 10x the MNIST frame
+BRUSH_RADIUS = 11          # px on the canvas
 INK_THRESHOLD = 30         # pixels above this count for the bounding box
 BOX_SIZE = 20              # longest side of the digit after scaling (MNIST)
 FRAME_SIZE = 28            # MNIST frame
 FRAME_CENTER = 14          # target (row, col) of the center of mass
 BINARY_THRESHOLD = 127     # ToTensor() then x > 0.5  <=>  byte >= 128
-PREVIEW_SCALE = 8          # 28 * 8 = 224 px preview
+PREVIEW_SCALE = 9          # 28 * 9 = 252 px preview
 POLL_MS = 20               # how often Tk checks for finished background jobs
+FONT_BOOST = 1             # pt added to Tk's named fonts: the whole UI reads larger
 
 
 def preprocess(img):
@@ -122,6 +128,13 @@ class Worker:
             self.root.after(POLL_MS, self._poll)
 
 
+def _enlarge_fonts(points):
+    """Add points to Tk's named fonts; the panels copy theirs from these."""
+    for name in ("TkDefaultFont", "TkTextFont", "TkFixedFont", "TkMenuFont", "TkHeadingFont"):
+        f = tkfont.nametofont(name)
+        f.config(size=f.actual("size") + points)
+
+
 class DrawingApp(tk.Tk):
     """Window with a drawing canvas, a preview of the network input and the result.
 
@@ -131,15 +144,22 @@ class DrawingApp(tk.Tk):
     side_panel(app) -> tk widget, if given, is placed on the right. It can run
     its own jobs with app.run_in_background, and its refresh() is called after
     each result.
+    below(app) -> tk widget, if given, is placed under the buttons instead of
+    the large result label: it shows the answer itself. It gets start(x) when
+    a digit goes to the Z80, refresh() after the answer, and clear() on Clear
+    and after Stop.
+    With side_panel or below, their focus_parts() and the drawing and preview
+    go to focus.HoverFocus, with a "Focus on hover" checkbox next to Clear.
     on_stop(), if given, adds Stop: it is called in Tk's thread and must make
     the running on_submit return soon. Its answer is dropped, then
     on_stopped() is called, before any other job starts. Recognize while the
     Z80 works stops it and runs the new drawing next; Clear stops it too.
     """
 
-    def __init__(self, on_submit=None, side_panel=None, on_stop=None, on_stopped=None):
+    def __init__(self, on_submit=None, side_panel=None, on_stop=None, on_stopped=None, below=None):
         super().__init__()
-        self.title("Draw a digit")
+        _enlarge_fonts(FONT_BOOST)
+        self.title("MNIST on Z80")
         self.on_submit = on_submit
         self.on_stop = on_stop
         self.on_stopped = on_stopped
@@ -151,10 +171,27 @@ class DrawingApp(tk.Tk):
         self.pen = ImageDraw.Draw(self.image)
         self.worker = Worker(self)
         self._build_widgets()
+        self.below = None
+        if below is not None:       # before the side panel, which may report to it
+            self.below = below(self)
+            self.below.grid(row=3, column=0, columnspan=2, sticky="w", padx=10)
+            self.result.grid_remove()   # below shows the answer (result still gets the text)
         self.panel = None
         if side_panel is not None:
             self.panel = side_panel(self)
-            self.panel.grid(row=0, column=2, rowspan=4, sticky="n", padx=10, pady=10)
+            self.panel.grid(row=0, column=2, rowspan=6, sticky="n", padx=10, pady=10)
+        self.hover_focus = None
+        if self.panel is not None or self.below is not None:
+            from focus import HoverFocus
+            parts = list(self.parts)
+            for widget in (self.below, self.panel):
+                if widget is not None and hasattr(widget, "focus_parts"):
+                    parts += widget.focus_parts()
+            self.hover_focus = HoverFocus(self, parts)
+            self.focus_on = tk.BooleanVar(value=True)
+            tk.Checkbutton(self.buttons, text="Focus on hover", variable=self.focus_on,
+                           command=lambda: self.hover_focus.set_enabled(self.focus_on.get())).pack(
+                side=tk.LEFT, padx=(15, 5))
         self.clear()
 
     def run_in_background(self, fn, done):
@@ -162,26 +199,36 @@ class DrawingApp(tk.Tk):
 
     def _build_widgets(self):
         """Create and lay out the widgets, bind mouse and keyboard."""
-        self.canvas = tk.Canvas(self, width=CANVAS_SIZE, height=CANVAS_SIZE,
+        side = FRAME_SIZE * PREVIEW_SCALE
+        self.parts = []                 # drawing and preview, each with its caption
+        for col, text, width in ((0, "Your drawing", CANVAS_SIZE),
+                                 (1, f"What the Z80 receives: {FRAME_SIZE}×{FRAME_SIZE} pixels, "
+                                     f"1 bit each = {FRAME_SIZE * FRAME_SIZE // 8} bytes", side)):
+            part = tk.Frame(self)
+            part.grid(row=0, column=col, sticky="n", padx=8, pady=(6, 0))
+            tk.Label(part, text=text, anchor="sw", justify="left", wraplength=width, height=2).pack(
+                fill="x", padx=2)
+            self.parts.append(part)
+        self.canvas = tk.Canvas(self.parts[0], width=CANVAS_SIZE, height=CANVAS_SIZE,
                                 bg="black", highlightthickness=0, cursor="pencil")
-        self.canvas.grid(row=0, column=0, padx=10, pady=10)
-        self.preview = tk.Label(self, bg="black")
-        self.preview.grid(row=0, column=1, padx=10, pady=10)
+        self.canvas.pack(padx=2, pady=2)
+        self.preview = tk.Label(self.parts[1], bg="black")
+        self.preview.pack(anchor="nw", padx=2, pady=2)
 
-        buttons = tk.Frame(self)
-        buttons.grid(row=1, column=0, columnspan=2)
-        self.recognize_button = tk.Button(buttons, text="Recognize", command=self.recognize)
+        buttons = self.buttons = tk.Frame(self)
+        buttons.grid(row=2, column=0, columnspan=2, pady=6)
+        self.recognize_button = ttk.Button(buttons, text="Recognize", command=self.recognize)
         self.recognize_button.pack(side=tk.LEFT, padx=5)
         self.stop_button = None
         if self.on_stop is not None:
-            self.stop_button = tk.Button(buttons, text="Stop", command=self.stop, state=tk.DISABLED)
+            self.stop_button = ttk.Button(buttons, text="Stop", command=self.stop, state=tk.DISABLED)
             self.stop_button.pack(side=tk.LEFT, padx=5)
-        tk.Button(buttons, text="Clear", command=self.clear).pack(side=tk.LEFT, padx=5)
+        ttk.Button(buttons, text="Clear", command=self.clear).pack(side=tk.LEFT, padx=5)
 
         self.result = tk.Label(self, font=("Helvetica", 48, "bold"))
-        self.result.grid(row=2, column=0, columnspan=2)
+        self.result.grid(row=4, column=0, columnspan=2)
         self.status = tk.Label(self, font=("Helvetica", 12))
-        self.status.grid(row=3, column=0, columnspan=2, pady=(0, 10))
+        self.status.grid(row=5, column=0, columnspan=2, pady=(2, 6))
 
         self.canvas.bind("<Button-1>", self._on_paint)
         self.canvas.bind("<B1-Motion>", self._on_paint)
@@ -232,6 +279,8 @@ class DrawingApp(tk.Tk):
         else:
             self.stop_button.config(state=tk.NORMAL)
         self.status.config(text="The Z80 is working...")
+        if self.below is not None:
+            self.below.start(x)
         self.run_in_background(lambda: self.on_submit(x), self._on_result)
 
     def stop(self):
@@ -259,14 +308,20 @@ class DrawingApp(tk.Tk):
                 self._submit(x)
                 return
             self.status.config(text="Stopped: draw another digit")
+            if self.below is not None:
+                self.below.clear()
             if self.panel is not None:
                 self.panel.refresh()
             return
         if error is not None:
             self.status.config(text=f"Error: {error}")
+            if self.below is not None:
+                self.below.clear()
             return
         self.status.config(text="")
         self.result.config(text=text)
+        if self.below is not None:
+            self.below.refresh()
         if self.panel is not None:
             self.panel.refresh()
 
@@ -279,6 +334,8 @@ class DrawingApp(tk.Tk):
         self.result.config(text="")
         self.status.config(text="Draw a digit, then press Enter")
         self.next_x = None
+        if self.below is not None:
+            self.below.clear()
         self.stop()
 
     def _show_preview(self, x):

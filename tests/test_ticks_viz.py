@@ -21,7 +21,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "host"))
 sys.path.insert(0, os.path.join(ROOT, "training"))
-from z80debug import PROG, READ, WRITE, LiveSource, MapSymbols  # noqa: E402
+from z80debug import PROG, READ, WRITE, LiveSource, MapSymbols, infer_step  # noqa: E402
 from z80nn import Z80NN  # noqa: E402
 
 VIZ_TICKS = os.path.join(ROOT, "build", "ticks-viz", "src", "ticks", "z88dk-ticks")
@@ -128,6 +128,31 @@ def test_call_stack_mid_inference(live):
     src.speed = 0
     t.join()
     assert names[-3:] == ["_nn_infer", "_cmd_infer", "_main"], names
+
+
+def test_infer_step_follows_the_network(live):
+    """What the network view shows: layer 1 neuron by neuron, then layer 2 digit by digit."""
+    z80, src = live
+    sym = src.symbols
+    src.speed = 2_000_000              # about 2.5 s for one digit
+    src.capture(0)
+    t = threading.Thread(target=z80.classify_debug, args=(records()[3]["x"],))
+    t.start()
+    steps = []
+    while t.is_alive():
+        step = infer_step(src.capture(0), sym)
+        if step is not None and step[0]:
+            steps.append(step)
+        time.sleep(0.02)
+    src.speed = 0
+    t.join()
+    kinds = [k for k, _ in steps]
+    layer1 = [n for k, n in steps if k == "layer1"]
+    layer2 = [n for k, n in steps if k == "layer2"]
+    assert layer1 == sorted(layer1) and len(set(layer1)) >= 24, layer1     # in order, most seen
+    assert layer2 == sorted(layer2) and layer2, layer2
+    assert kinds.index("layer2") > len(kinds) - 1 - kinds[::-1].index("layer1")  # after all of layer 1
+    assert max(layer1) == 31 and min(layer1) <= 1
 
 
 def test_speed_holds_the_clock(live):

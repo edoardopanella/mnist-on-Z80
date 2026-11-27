@@ -26,21 +26,21 @@ def load_test_images():
 
     images, labels = [], []
     for batch, target in test_loader:
-        # (B, 1, 28, 28) -> (B, 784), riga per riga come nn.Flatten
+        # (B, 1, 28, 28) -> (B, 784), row by row, like nn.Flatten
         images.append(batch.reshape(batch.shape[0], 784).numpy().astype(np.int64))
         labels.append(target.numpy())
 
-    images = np.concatenate(images)   # forma (10000, 784)
-    labels = np.concatenate(labels)   # forma (10000,)
+    images = np.concatenate(images)   # shape (10000, 784)
+    labels = np.concatenate(labels)   # shape (10000,)
 
     assert images.shape == (10000, 784)
-    assert set(np.unique(images)) <= {0, 1}, "Le immagini non sono binarizzate"
+    assert set(np.unique(images)) <= {0, 1}, "images are not binarized"
     return images, labels
 
 
 def infer_int(x, q):
-    assert x.shape == (784,), f"Attese 784 posizioni, trovate {x.shape}"
-    assert np.all((x == 0) | (x == 1)), "L'immagine contiene valori diversi da 0 e 1"
+    assert x.shape == (784,), f"expected shape (784,), got {x.shape}"
+    assert np.all((x == 0) | (x == 1)), "image contains values other than 0 and 1"
 
 
     acc1 = (q['W1q'] @ x) +q['b1q']
@@ -67,18 +67,18 @@ def load_float_model():
 def evaluate(images, labels, q):
     N = images.shape[0]
 
-    # Step 1: predizioni del modello float
+    # Step 1: float model predictions
     model = load_float_model()
-    float_logits = model(torch.from_numpy(images).float())   # forma (N, 10)
-    pred_float = float_logits.argmax(dim=1).numpy()          # forma (N,)
+    float_logits = model(torch.from_numpy(images).float())   # shape (N, 10)
+    pred_float = float_logits.argmax(dim=1).numpy()          # shape (N,)
 
-    # Step 2: contatori
+    # Step 2: counters
     correct_int = 0
     agreed = 0
     count_127 = 0
     max_acc1 = float('-inf')
 
-    # Step 3: riferimento a interi, un'immagine alla volta
+    # Step 3: integer reference, one image at a time
     for i in range(N):
         digit, acc1, h_q, acc2 = infer_int(images[i], q)
         if digit == labels[i]:
@@ -88,7 +88,7 @@ def evaluate(images, labels, q):
         count_127 += np.count_nonzero(h_q == 127)
         max_acc1 = max(max_acc1, int(np.max(acc1)))
 
-    # Step 4: risultati
+    # Step 4: results
     return {
         "acc_float": float(np.mean(pred_float == labels)),
         "acc_int": correct_int / N,
@@ -103,11 +103,11 @@ def main():
     images, labels = load_test_images()
     r = evaluate(images, labels, q)
 
-    print(f"Accuratezza float:   {r['acc_float']:.2%}")
-    print(f"Accuratezza interi:  {r['acc_int']:.2%}")
-    print(f"Accordo float/int:   {r['agreement']:.2%}")
-    print(f"h_q saturati a 127:  {r['perc_127']:.4%}")
-    print(f"Max acc1 osservato:  {r['max_acc1']}  (bound: {q['bound']})")
+    print(f"Float accuracy:       {r['acc_float']:.2%}")
+    print(f"Integer accuracy:     {r['acc_int']:.2%}")
+    print(f"Float/int agreement:  {r['agreement']:.2%}")
+    print(f"h_q saturated at 127: {r['perc_127']:.4%}")
+    print(f"Max acc1 observed:    {r['max_acc1']}  (bound: {q['bound']})")
 
 
 if __name__ == "__main__":

@@ -1,12 +1,12 @@
 '''
-Libreria di collegamento tra input mac e z80. Serve a fare da tramite tra l'input che diamo noi dal mac 
-e la scheda z80
+Host-side client for the Z80 inference firmware: sends weights, images and
+debug commands over the line protocol to a native build, the emulator or the board.
 '''
 
 
 import os
 import pty
-import subprocess # È un modulo già incluso in Python (non va installato) che serve a lanciare altri programmi dall’interno di uno script Python. È come se Python aprisse un terminale, scrivesse il nome di un programma e premesse Invio al posto vostro.
+import subprocess
 import tty
 
 import numpy as np
@@ -17,17 +17,15 @@ MAX_CHUNK = 64      # bytes per W or M line
 
 class Z80NN:
     def __init__(self, target, where, ticks="z88dk-ticks", shm=None):
-        # target: "local" (programma sul mac), "emu" (emulatore), "board" (la scheda)
+        # target: "local" (native build on the host), "emu" (emulator), "board" (the board)
         # emu only: ticks = the emulator to run; shm = file for the live view, which
         # needs the patched ticks (make ticks-viz, see host/z80debug.py LiveSource)
         self.target = target
 
         if target == "local":
-            # lancia il programma, come se lo scrivessimo sul terminale
-            self.proc = subprocess.Popen([where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) # avvia un programma e lo lascia acceso, POPEN sta per PROCESS OPEN
+            self.proc = subprocess.Popen([where], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
 
         elif target == "emu":
-            # uguale a prima ma il programma che lancia è l'emulator
             # where = build/emu.bin (make emu) or build/board.rom (make rom, ACIA emulated by ticks).
             # -counter: ticks quits after 1e8 T-states by default, about 10 inferences
             # stdout is a pseudo-terminal, not a pipe: ticks' emulated ACIA never flushes,
@@ -41,7 +39,7 @@ class Z80NN:
             self.out = os.fdopen(master, "r", encoding="ascii", newline="")
 
         elif target == "board":
-            import serial # usa porte seriali, ovvero USB
+            import serial
             self.port = serial.Serial(where, 115200,rtscts=True, timeout=5)
 
 
@@ -82,7 +80,7 @@ class Z80NN:
         return answer
 
     def version(self):
-        return self.send("V") # manda al target il commando V e ritorna la risposta
+        return self.send("V")
 
     # Sending the weights as chunks of 64 bytes each
 
@@ -92,7 +90,7 @@ class Z80NN:
         if data[:4] != b"Z8NN" or data[4] != 1:
             raise ValueError("this is not a weights.bin file")
 
-        payload = data[5:] # everything but the first 5 bytes of intestazione
+        payload = data[5:] # skip the 5-byte header
 
         for offset in range(0, len(payload), 64): # 0, 64, 128, ...
             chunk = payload[offset: offset + 64] 
@@ -101,7 +99,7 @@ class Z80NN:
 
         # checksum
         expected = sum(payload) % 65536
-        answer = self.send("C") # risposta tipo "C 3A7F", è l'istruzione checksum, ovvero somma tutti i byte dei pesi che hai ricevuto
+        answer = self.send("C") # e.g. "C 3A7F": 16-bit sum of the weight bytes received
         got = int(answer.split()[1], 16)
 
         if got != expected:
@@ -142,7 +140,7 @@ class Z80NN:
         return bytes(data)
 
     def _read_numbers(self, label, count):
-        # legge una riga tipo "A1 323 420 -193 ..." e restituisce i numeri
+        # reads a line like "A1 323 420 -193 ..." and returns the numbers
         line = self._read_line()
         parts = line.split()
         if parts[0] != label or len(parts) != count + 1:
@@ -165,11 +163,11 @@ class Z80NN:
                 self.out.close()
    
 
-# utility per trasformare un immagine in bytes invece che bits
+# 784 binary pixels -> 98 bytes (MSB first) -> uppercase hex
 
 def pack_image(x):
     bits = np.asarray(x, dtype=np.uint8).reshape(784)
-    return np.packbits(bits).tobytes().hex().upper() # in esadecimale
+    return np.packbits(bits).tobytes().hex().upper()
 
 
 

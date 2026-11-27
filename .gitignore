@@ -17,7 +17,6 @@ testvec.bin
 # C build output (gcc and z88dk)
 build/
 *.o
-*.bin
 *.hex
 *.ihx
 *.map

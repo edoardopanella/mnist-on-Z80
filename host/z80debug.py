@@ -35,8 +35,13 @@ BLOCK_TITLES = {"_weights": "Weights", "_x": "Image", "_trace": "Results",
                 "_buf": "Serial", "_line": "Serial", "_stack_copy": "Debug", "_regs": "Debug"}
 FREE_MIN = 1024                 # smaller gaps join a neighbouring block
 
-N_HID, N_OUT = 32, 10           # firmware/nn.h
+N_IN, N_HID, N_OUT = 784, 32, 10      # firmware/nn.h
 TRACE_SIZE = 4 * N_HID + N_HID + 4 * N_OUT     # struct nn_trace: acc1, h_q, acc2
+# struct nn_weights (no padding, docs/spec.md §7.2): W1q, b1q, M0, shift, W2q, b2q
+W2Q_OFS = N_HID * N_IN + 4 * N_HID + 4 + 1     # 25,221
+WEIGHTS_SIZE = W2Q_OFS + N_OUT * N_HID + 4 * N_OUT     # 25,581
+# Functions of firmware/nn.c: the PC or a return address in one of them = inside nn_infer
+NN_FUNCS = ("_nn_infer", "_layer1_neuron", "_requant", "_layer2_neuron")
 
 _MAP_LINE = re.compile(r"^(\w+)\s+= \$([0-9A-F]{4}) ; (\w+), ")
 # Compiler-made labels: no use as names in the stack view
@@ -268,6 +273,38 @@ def call_stack(regs, stack_bytes, sym):
             break
         ix = saved
     return frames
+
+
+def infer_step(snap, sym):
+    """Where nn_infer is, from the weights the Z80 read since the previous capture.
+
+    layer1_neuron(j) reads only row j of W1q (784 bytes, at the lit pixels),
+    layer2_neuron(k) only row k of W2q (32 bytes), so the rows read say which
+    neuron it is on. Returns
+        None            not inside nn_infer (by the call stack)
+        ("layer1", j)   computing hidden neuron j
+        ("layer2", k)   computing the score of digit k
+        ("trace", None) copying the results into trace (the last step)
+        ("", None)      inside nn_infer, but no weights read this time
+    Needs read bits, so only live sources give more than None / ("", None).
+    """
+    if not any(name and name.split("+")[0] in NN_FUNCS for _, name in snap.frames):
+        return None
+    if "_weights" not in sym.addr:
+        return "", None
+    w = sym["_weights"]
+    read = np.nonzero(snap.activity[w:w + WEIGHTS_SIZE] & READ)[0]
+    w2 = read[(read >= W2Q_OFS) & (read < W2Q_OFS + N_OUT * N_HID)]
+    if w2.size:
+        return "layer2", int(w2.max() - W2Q_OFS) // N_HID
+    w1 = read[read < N_HID * N_IN]
+    if w1.size:
+        return "layer1", int(w1.max()) // N_IN
+    if "_trace" in sym.addr:
+        t = sym["_trace"]
+        if (snap.activity[t:t + TRACE_SIZE] & WRITE).any():
+            return "trace", None
+    return "", None
 
 
 def decode_acc2(trace):

@@ -4,11 +4,12 @@ debug_panel.py - DeZog-style debug view, shown next to the drawing window.
 DebugPanel shows one z80debug.Snapshot:
 
     Memory map      0x0000-0xFFFF as named blocks (Program, Weights, Image,
-                    Results, Serial, Debug, Free, Stack), each with its own
-                    strip of accesses in the colours of DeZog's zsim: read
-                    yellow, write red, prog blue. White line: PC; green box:
-                    the memory window. Under it, one sentence: what the Z80
-                    is doing and which blocks it reads and writes.
+                    Results, Serial, Debug, Free, Stack) with their sizes, each
+                    with its own strip of accesses in the colours of DeZog's
+                    zsim: read yellow, write red, prog blue. White line: PC;
+                    green box: the memory window. Under it, one sentence: what
+                    the Z80 is doing (in nn_infer: which layer and neuron) and
+                    which blocks it reads and writes.
                     Hover: address and symbol. Click: show that address below.
     Registers       red = changed since the previous snapshot; flags decoded
     Call stack      PC, then the return addresses of the IX frame chain
@@ -19,8 +20,13 @@ DebugPanel shows one z80debug.Snapshot:
                     Hex   16 x 16 bytes + ASCII, each byte coloured by its access
                     Image 28 x 28 pixels, 28 per row like the MNIST frame:
                           one byte per pixel (x; at weights, one neuron's
-                          W1q row: + orange, - blue) or one bit (buf, packed)
-    Scores          the 10 output scores (acc2), the winner in green
+                          W1q row: + orange, - blue) or one bit (buf, packed).
+                          It opens on x as an image; show_weights_of(j) opens
+                          hidden neuron j's weights.
+
+Every part has a one-line caption in plain words, for people who do not know
+the Z80. The network itself (hidden values, scores) is network_view.py, under
+the drawing: on_step(step) gives it z80debug.infer_step() at every capture.
 
 Two modes, from the source:
     snapshot  (SnapshotSource) after each result. The panel never talks to the
@@ -42,10 +48,11 @@ from tkinter import ttk
 import numpy as np
 from PIL import Image, ImageTk
 
-from z80debug import IMG_W, PROG, READ, VARIABLES, VIEW_BYTES, WRITE, flags, image_bytes, image_rows
+from z80debug import (IMG_W, N_HID, N_IN, PROG, READ, VARIABLES, VIEW_BYTES, WRITE, flags, image_bytes,
+                      image_rows, infer_step)
 
-MAP_W = 680                             # memory map width, px
-TITLE_H, STRIP_H, PC_H = 18, 22, 9      # block titles, access strips, PC marker
+MAP_W = 720                             # memory map width, px
+TITLE_H, STRIP_H, PC_H = 32, 22, 9      # block titles + sizes, access strips, PC marker
 GAP = 4                                 # px between blocks
 FIXED_W = {"Free": 56, "Stack": 72}     # blocks whose size says nothing
 BAR_BG = (40, 40, 40)
@@ -53,6 +60,9 @@ STRIP_KINDS = (WRITE, PROG, READ)       # equal ages: the first one wins
 # What the Z80 is doing, from the innermost of these functions on the call stack
 DOING = {"_nn_infer": "classifying the digit", "_read_line": "waiting for the laptop",
          "_cmd_write": "receiving the weights", "_cmd_checksum": "checking the weights",
+         "_hex_bytes": "decoding the hex text it received", "_hex_digit": "decoding the hex text it received",
+         "_put_i32": "writing the results as decimal text", "_put_list": "writing the results as decimal text",
+         "_put_str": "sending text to the laptop",
          "_cmd_infer": "handling the image", "_cmd_regs": "sending its registers",
          "_cmd_memory": "sending memory to this panel",
          "SYSCALL": "talking to the laptop"}    # ticks' console trap: no IX frame above it
@@ -71,6 +81,7 @@ IMG_LABEL_W = 44                        # image view: room for the row addresses
 IMG_LIT, IMG_DARK, IMG_GRID = (240, 240, 240), (28, 28, 28), (60, 60, 60)
 IMG_POS, IMG_NEG = (255, 150, 40), (70, 150, 255)     # signed bytes: + orange, - blue
 HEX_ROW = 16                            # bytes per row of the hex view
+GREY = "#808080"                        # captions and other secondary text
 SPEEDS = [("100 kHz", 100_000), ("1 MHz", 1_000_000), ("3.5 MHz", 3_500_000),
           ("7.37 MHz (board)", BOARD_HZ), ("max", 0)]
 REG_ROWS = [("AF", "af"), ("BC", "bc"), ("DE", "de"), ("HL", "hl"),
@@ -143,13 +154,19 @@ def size_text(n):
 
 class DebugPanel(tk.Frame):
 
-    def __init__(self, master, symbols, capture, run_in_background, note="", live=None):
-        """live: a z80debug.LiveSource for the live mode (speed and pause), or None."""
+    def __init__(self, master, symbols, capture, run_in_background, note="", live=None, on_step=None):
+        """live: a z80debug.LiveSource for the live mode (speed and pause), or None.
+
+        on_step(step), if given, is called at every capture with where nn_infer
+        is (z80debug.infer_step; the last one known while no weights are read).
+        """
         super().__init__(master)
         self.symbols = symbols
         self.capture = capture
         self.run_in_background = run_in_background
         self.live = live
+        self.on_step = on_step
+        self.step = None                                # infer_step(), kept while no weights are read
         self.view_addr = symbols["_x"] if "_x" in symbols.addr else symbols.data[0]
         self.snap = None
         self.prev_regs = None
@@ -165,21 +182,36 @@ class DebugPanel(tk.Frame):
         self.text_cache = {}                            # widget -> lines shown, to skip rewrites
         self.img_rows = None                            # image view: (lit, offset) shown
         self.mono = tkfont.nametofont("TkFixedFont")
-        self.small = tkfont.Font(family=self.mono.actual("family"), size=9)
+        self.small = tkfont.Font(family=self.mono.actual("family"), size=self.mono.actual("size") - 1)
+        self.caption_font = self.title_font.copy()
+        self.caption_font.config(size=max(9, self.title_font.actual("size") - 2))
         self._build(note)
         if live is not None:
             self.after(LIVE_MS, self._live_tick)
 
     # --- layout ---------------------------------------------------------------
 
+    def _caption(self, parent, text):
+        """A grey line of explanation, wrapped to the width its parent gets (not placed)."""
+        # width=1: a caption must not widen the panel; it wraps to the width the rest sets
+        label = tk.Label(parent, text=text, font=self.caption_font, fg=GREY, anchor="nw",
+                         justify="left", width=1)
+        label.bind("<Configure>", lambda e: e.widget.config(wraplength=max(50, e.width - 4)))
+        return label
+
     def _build(self, note):
         bar = tk.LabelFrame(self, text="Memory map")
         bar.grid(row=0, column=0, columnspan=2, sticky="ew")
+        self._caption(bar, "The Z80's 64 KB, in address order, split into what the program keeps "
+                           "there. A block lights up when the Z80 reads it, writes it or runs code "
+                           "from it. Hover for addresses, click to open one in Memory.").pack(fill="x", padx=4)
         self.bar = tk.Canvas(bar, width=MAP_W, height=TITLE_H + STRIP_H + PC_H,
                              highlightthickness=0, cursor="crosshair")
         self.bar.pack(padx=4, pady=(4, 0))
         self.gap_rgb = [v // 257 for v in self.winfo_rgb(self.bar.cget("bg"))]
-        self.now = tk.Label(bar, anchor="w", justify="left")
+        # width=1 on the lines that change 20 times a second: they are cut at the frame's width
+        # instead of resizing the window (which would also move focus.HoverFocus's veils)
+        self.now = tk.Label(bar, anchor="w", justify="left", width=1)
         self.now.pack(fill="x", padx=4)
         legend = tk.Frame(bar)
         legend.pack(fill="x", padx=4, pady=2)
@@ -193,7 +225,7 @@ class DebugPanel(tk.Frame):
         self.bar.bind("<Button-1>", self._on_bar_click)
 
         left = tk.Frame(self)
-        left.grid(row=1, column=0, sticky="nw", padx=(0, 8))
+        left.grid(row=1, column=0, sticky="nsew", padx=(0, 8))
         regs = tk.LabelFrame(left, text="Registers")
         regs.pack(fill="x")
         self.reg_labels = {}
@@ -205,18 +237,27 @@ class DebugPanel(tk.Frame):
         self.ir_label = tk.Label(regs, font=self.mono, anchor="w")
         self.ir_label.grid(row=4, column=0, columnspan=6, sticky="w", padx=6)
         self.flag_label = tk.Label(regs, font=self.mono, anchor="w")
-        self.flag_label.grid(row=5, column=0, columnspan=6, sticky="w", padx=6, pady=(0, 4))
+        self.flag_label.grid(row=5, column=0, columnspan=6, sticky="w", padx=6)
+        self._caption(regs, "The CPU's own variables. PC: next instruction · SP: top of the "
+                            "stack · F: flags of the last operation. Red: just changed.").grid(
+            row=6, column=0, columnspan=6, sticky="ew", padx=2, pady=(2, 4))
 
         calls = tk.LabelFrame(left, text="Call stack")
-        calls.pack(fill="x", pady=(6, 0))
+        calls.pack(fill="both", expand=True, pady=(6, 0))
+        self._caption(calls, "The function running now (top) and its callers.").pack(
+            fill="x", padx=2)
         self.calls = tk.Text(calls, width=30, height=4, font=self.mono, relief="flat",
                              bg=self.cget("bg"), state="disabled", wrap="none")
-        self.calls.pack(padx=4, pady=2)
+        self.calls.pack(fill="both", expand=True, padx=4, pady=2)
 
-        stack = tk.LabelFrame(left, text="Stack")
-        stack.pack(fill="x", pady=(6, 0))
-        self.stack = tk.Text(stack, width=30, height=9, font=self.mono, state="disabled", wrap="none")
-        scroll = tk.Scrollbar(stack, command=self.stack.yview)
+        stack = tk.LabelFrame(self, text="Stack")
+        stack.grid(row=2, column=0, sticky="nsew", padx=(0, 8), pady=(6, 0))
+        self._caption(stack, "From SP up: return addresses (blue) and saved values.").pack(
+            fill="x", padx=2)
+        stack_body = tk.Frame(stack)
+        stack_body.pack(fill="x")
+        self.stack = tk.Text(stack_body, width=30, height=7, font=self.mono, state="disabled", wrap="none")
+        scroll = tk.Scrollbar(stack_body, command=self.stack.yview)
         self.stack.config(yscrollcommand=scroll.set)
         self.stack.pack(side="left", padx=(4, 0), pady=4)
         scroll.pack(side="left", fill="y", pady=4)
@@ -224,9 +265,11 @@ class DebugPanel(tk.Frame):
         self.stack.tag_config("w", foreground=HEX[WRITE])
 
         right = tk.Frame(self)
-        right.grid(row=1, column=1, sticky="nw")
+        right.grid(row=1, column=1, sticky="nsew")
         mem = tk.LabelFrame(right, text="Memory")
         mem.pack(fill="x")
+        self._caption(mem, "Any part of the 64 KB. As an image, x is the digit the network reads; "
+                           "at weights, each 28×28 is one neuron's weights.").pack(fill="x", padx=4)
         nav = tk.Frame(mem)
         nav.pack(fill="x", padx=4, pady=(2, 0))
         tk.Label(nav, text="Go to").pack(side="left")
@@ -239,7 +282,7 @@ class DebugPanel(tk.Frame):
         self.addr_entry.pack(side="left", padx=4)
         self.addr_entry.bind("<Return>", self._on_addr_entry)
         tk.Label(nav, text="hex, Enter", font=self.small, fg="#808080").pack(side="left")
-        tk.Button(nav, text="Refresh", command=self.refresh).pack(side="right")
+        ttk.Button(nav, text="Refresh", command=self.refresh).pack(side="right")
         opts = tk.Frame(mem)
         opts.pack(fill="x", padx=4, pady=(2, 2))
         tk.Label(opts, text="View").pack(side="left")
@@ -257,8 +300,11 @@ class DebugPanel(tk.Frame):
             self.pixel_buttons.append(b)
         body = tk.Frame(mem)
         body.pack(fill="x", padx=4)
-        self.mem_hint = tk.Label(mem, font=self.small, fg="#808080", anchor="w")
+        # width=1: the hint must not widen the panel; it wraps to the width the hex view sets
+        self.mem_hint = tk.Label(mem, font=self.small, fg="#808080", anchor="nw", justify="left",
+                                 width=1, height=2)
         self.mem_hint.pack(fill="x", padx=4, pady=(0, 2))
+        self.mem_hint.bind("<Configure>", lambda e: e.widget.config(wraplength=e.width - 4))
         self.mem_scroll = tk.Scrollbar(body, command=self._on_mem_scroll)
         self.mem_scroll.pack(side="right", fill="y")
         self.mem = tk.Text(body, width=6 + 3 * HEX_ROW + 17, height=VIEW_BYTES // HEX_ROW, font=self.mono,
@@ -284,30 +330,35 @@ class DebugPanel(tk.Frame):
         for kind in (READ, WRITE, PROG):
             self.mem.tag_config(kind, background=HEX[kind], foreground="white" if kind != READ else "black")
 
-        scores = tk.LabelFrame(right, text="Scores (acc2)")
-        scores.pack(fill="x", pady=(6, 0))
-        self.scores = tk.Canvas(scores, width=6 + 3 * 16 * self.mono.measure("0"), height=10 * 14 + 4,
-                                highlightthickness=0)
-        self.scores.pack(padx=4, pady=2)
-
         if self.live is not None:
-            run = tk.Frame(right)
-            run.pack(fill="x", pady=(6, 0))
-            tk.Label(run, text="Clock").pack(side="left")
+            clock = tk.LabelFrame(self, text="Clock")
+            clock.grid(row=2, column=1, sticky="nsew", pady=(6, 0))
+            self._caption(clock, "Clock cycles per second of the emulated Z80 (the board: 7.37 MHz). "
+                                 "Slow it down to watch each neuron.").pack(fill="x", padx=4)
+            run = tk.Frame(clock)
+            run.pack(fill="x", padx=4, pady=(2, 0))
             self.speed = ttk.Combobox(run, values=[n for n, _ in SPEEDS], width=15, state="readonly")
             current = [hz for _, hz in SPEEDS].index(self.live.speed) if self.live.speed in \
                 [hz for _, hz in SPEEDS] else len(SPEEDS) - 1
             self.speed.current(current)
             self.speed.bind("<<ComboboxSelected>>", self._on_speed)
             self.speed.pack(side="left", padx=4)
-            self.pause_button = tk.Button(run, text="Pause", width=7, command=self._on_pause)
+            self.pause_button = ttk.Button(run, text="Pause", width=7, command=self._on_pause)
             self.pause_button.pack(side="left", padx=4)
-            self.clock = tk.Label(right, font=self.small, anchor="w")
-            self.clock.pack(fill="x")
+            self.clock = tk.Label(clock, font=self.small, anchor="w", width=1)
+            self.clock.pack(fill="x", padx=4, pady=(0, 4))
 
-        self.status = tk.Label(self, text=note, font=self.small, anchor="w", justify="left")
-        self.status.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        self.parts = [bar, regs, calls, stack, mem] + ([clock] if self.live is not None else [])
+        self.status = self._caption(self, note)
+        self.status.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(4, 0))
+        if self.view_addr == self.symbols.addr.get("_x"):
+            self.view_mode.set("image")     # the digit as the network sees it
+            self._apply_view_mode()
         self._draw_map(None)
+
+    def focus_parts(self):
+        """The parts focus.HoverFocus can put in focus: map, registers, call stack, stack, memory, clock."""
+        return self.parts
 
     # --- refresh --------------------------------------------------------------
 
@@ -390,22 +441,26 @@ class DebugPanel(tk.Frame):
     def show(self, snap):
         self.snap = snap
         self._update_access(snap.activity, snap.live)
-        self._draw_map(snap)
+        step = infer_step(snap, self.symbols)
+        if step is None or step[0]:         # ("", None): nothing new read, keep the last one
+            self.step = step
+        self._draw_map(snap)                # its sentence uses self.step
         self._show_regs(snap.regs)
         self._show_calls(snap.frames)
         self._show_stack(snap)
         self._show_memory(snap)
-        self._show_scores(snap.acc2)
+        if self.on_step is not None:
+            self.on_step(self.step)
         if snap.tstates is not None and self.live is not None:
             self._show_clock(snap.tstates)
 
     def _show_clock(self, tstates):
         now = time.monotonic()
         if self.t_base is None:
-            text = f"Since start: {tstates:,} T-states"
+            text = f"Since start: {tstates:,} clock cycles (T-states)"
         else:
             n = max(0, tstates - self.t_base)
-            text = f"This digit: {n:,} T-states · {n / BOARD_HZ:.2f} s on the board"
+            text = f"This digit: {n:,} cycles · {n / BOARD_HZ:.2f} s on the board"
         if self.last_rate is not None and now - self.last_rate[0] > 0.4:
             mhz = (tstates - self.last_rate[1]) / (now - self.last_rate[0]) / 1e6
             idle = "paused" if self.live.paused else "idle"
@@ -422,16 +477,16 @@ class DebugPanel(tk.Frame):
         blocks = self.symbols.blocks(snap.regs["sp"] if snap else None)
         if blocks != self.map_key:      # SP moved, or the first time: titles and frames
             self.map_key = blocks
-            self.layout = layout_blocks(blocks, lambda t: self.title_font.measure(t) + 12)
+            size_w = self.caption_font.measure("00.0 KB")
+            self.layout = layout_blocks(blocks, lambda t: max(self.title_font.measure(t), size_w) + 12)
             c.delete("static")
             y0, y1 = TITLE_H, TITLE_H + STRIP_H
             for title, start, end, x0, x1 in self.layout:
-                c.create_text((x0 + x1) // 2, y0 - 2, text=title, anchor="s",
+                c.create_text((x0 + x1) // 2, y0 - 15, text=title, anchor="s",
                               font=self.title_font, tags="static")
+                c.create_text((x0 + x1) // 2, y0 - 2, text=size_text(end - start), anchor="s",
+                              fill=GREY, font=self.caption_font, tags="static")
                 c.create_rectangle(x0, y0, x1 - 1, y1 - 1, outline="#909090", tags="static")
-                if title == "Free":
-                    c.create_text((x0 + x1) // 2, (y0 + y1) // 2, text=size_text(end - start),
-                                  fill="#909090", font=self.small, tags="static")
         rgb = strip_row(self.kind, self.age, self.layout, self.gap_rgb)
         img = Image.fromarray(rgb.astype(np.uint8).reshape(1, MAP_W, 3), "RGB")
         self.strip_photo = ImageTk.PhotoImage(img.resize((MAP_W, STRIP_H), Image.NEAREST), master=self)
@@ -459,6 +514,11 @@ class DebugPanel(tk.Frame):
         func = (snap.frames[0][1] or "?").split("+")[0] if snap.frames else "?"
         doing = next((DOING[n.split("+")[0]] for _, n in snap.frames
                       if n and n.split("+")[0] in DOING), None)
+        kind, n = self.step or ("", None)
+        if snap.live and kind == "layer1":
+            doing = f"layer 1, hidden neuron #{n}"
+        elif snap.live and kind == "layer2":
+            doing = f"layer 2, the score of digit {n}"
         doing = f"{doing} ({func.lstrip('_')})" if doing else f"running {func.lstrip('_')}"
         recent = self.age > SHOWN
         reads, writes = [], []
@@ -589,25 +649,6 @@ class DebugPanel(tk.Frame):
             c.create_text(IMG_LABEL_W - 6, row * cell, text=f"{a:04X}", anchor="ne",
                           font=self.small, fill="#808080")
 
-    def _show_scores(self, acc2):
-        c = self.scores
-        c.delete("all")
-        if not acc2:
-            return
-        lo, hi = min(acc2 + [0]), max(acc2 + [0])
-        span = max(1, hi - lo)
-        best = int(np.argmax(acc2))
-        x_name, x0, width = 4, 20, int(c.cget("width")) - 110
-        zero = x0 + (0 - lo) * width // span
-        for d, v in enumerate(acc2):
-            y = 2 + d * 14
-            a, b = sorted((zero, x0 + (v - lo) * width // span))
-            c.create_text(x_name, y, text=str(d), anchor="nw", font=self.mono)
-            c.create_rectangle(a, y + 2, max(a + 1, b), y + 11, width=0,
-                               fill="#20a040" if d == best else "#9090a0")
-            c.create_text(x0 + width + 8, y, text=f"{v:,}", anchor="nw", font=self.small)
-        c.create_line(zero, 0, zero, 10 * 14 + 2, fill="#606060")
-
     # --- navigation -----------------------------------------------------------
 
     def view_len(self):
@@ -656,7 +697,19 @@ class DebugPanel(tk.Frame):
         else:
             self.scroll_rows(int(value))
 
+    def show_weights_of(self, j):
+        """Memory view on hidden neuron j's 784 weights (its W1q row), as a 28x28 image."""
+        self.view_addr = (self.symbols["_weights"] + N_IN * j) & 0xFFFF
+        self.pixel.set("byte")
+        self.view_mode.set("image")
+        self._on_view_mode()
+
     def _on_view_mode(self):
+        self._apply_view_mode()
+        self._after_view_change()
+
+    def _apply_view_mode(self):
+        """Hex or image: the widget shown, the pixel buttons, the hint."""
         image = self.view_mode.get() == "image"
         for b in self.pixel_buttons:
             b.config(state="normal" if image else "disabled")
@@ -668,7 +721,6 @@ class DebugPanel(tk.Frame):
             self.img.pack_forget()
             self.mem.pack(side="left")
         self._show_hint()
-        self._after_view_change()
 
     def _on_pixel(self):
         self._show_hint()
@@ -707,7 +759,13 @@ class DebugPanel(tk.Frame):
         name = self.symbols.nearest(addr)
         where = f"{addr:04X}" + (f" bit {7 - (row * IMG_W + col) % 8}" if bits else "")
         text = f"row {row}, col {col} · {where} = {value[row, col]}"
-        self.mem_hint.config(text=text + (f" · {name.lstrip('_')}" if name else ""))
+        w = self.symbols.addr.get("_weights")
+        if not bits and w is not None and 0 <= addr - w < N_HID * N_IN:
+            j, p = divmod(addr - w, N_IN)
+            text += f" · weight of neuron #{j} for pixel ({p // IMG_W}, {p % IMG_W})"
+        elif name:
+            text += f" · {name.lstrip('_')}"
+        self.mem_hint.config(text=text)
 
     def _on_goto(self, _event):
         choice = self.goto.get()

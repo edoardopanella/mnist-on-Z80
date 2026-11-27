@@ -7,7 +7,8 @@ Handwritten digit recognition on a Z80. A 784 → 32 → 10 MLP is trained in fl
 ```
 training/   Python pipeline: train → quantize → check → export
 firmware/   C inference library and Z80 programs
-host/       laptop tools: drawing app, Z80 link library, demo, debug panel
+host/       laptop tools: drawing app, Z80 link library, demo, network view, debug panel
+            (host/ui_v1/: backup of the first UI)
 tests/      pytest tests and DeZog input generator
 tools/      ticks-viz.patch: z88dk-ticks with a live view for the debug panel
 docs/       spec.md (formats and algorithm), plan.md, toolchain guide
@@ -170,9 +171,29 @@ python host/demo.py [TARGET] [WHERE] [--debug | --no-debug] [--map FILE] [--live
 
 The script prints `Connected: Z80NN 2`, uploads the weights, prints `Weights loaded, checksum OK`, and opens the window. Draw a digit with the mouse, then press **Recognize** or Enter; the digit the Z80 computed appears below. Press **Clear** or Esc to start again. The preview on the right shows the 28×28 image the Z80 receives.
 
+The UI is meant to explain what happens inside the machine: every part has a short caption in plain words.
+
 In the live view (emulator, debug panel) a slow clock makes one digit take seconds. **Stop** ends it: the Z80 finishes that inference at full speed, its answer is dropped, and the clock goes back to the one you chose. Pressing **Recognize** (or Enter) while the Z80 works does the same, then runs the new drawing; **Clear** (or Esc) also stops it.
 
 One classification costs about 5 million Z80 clock cycles: instant on the emulator, about 0.7 s on the board at 7.3728 MHz. On the board, uploading the weights takes a few seconds. The Z80 works in a background thread, so the window stays responsive meanwhile.
+
+### The network view
+
+With the debug panel, the space under the drawing shows the network the Z80 computes (`host/network_view.py`), in order:
+
+| Part | What it shows |
+| --- | --- |
+| Headline | What the Z80 is doing now (live: *Unpacking the image it received*, *Layer 1, neuron #12: adding its weights at the 74 lit pixels*, *Layer 2, digit 4*, then *Network done: writing the 74 results as text for the laptop*), then the answer with its score and the runner-up. With `D` that last phase is about a third of a digit's time: every `acc1`, `h_q` and `acc2` value goes out as decimal text, and each digit of a 32-bit number costs a 32-bit division. |
+| Layer 1 | 32 cells, one per hidden neuron: `h_q`, black = 0 (cut by ReLU) to white = the strongest of this digit. Live: the neuron being computed is outlined in yellow, the ones done turn grey; the values come with the `D` reply. Hover: the sum (`acc1`), ReLU and the rescaled value. Click: Memory shows that neuron's 784 weights as a 28×28 image. |
+| Layer 2 | The 10 scores (`acc2`), the highest in green: the answer. Live: the score being computed is outlined. |
+
+The live step comes from `infer_step()` (`host/z80debug.py`): `layer1_neuron(j)` reads only row *j* of `W1q`, `layer2_neuron(k)` only row *k* of `W2q`, so the weight rows read since the previous capture say which neuron the Z80 is on. At 1 MHz each hidden neuron takes about 0.15 s, slow enough to follow.
+
+### Focus on hover
+
+With the network view and the debug panel, the part under the mouse stays sharp and every other part fades, to keep the attention on one thing: the drawing, the preview, layer 1, layer 2, and each frame of the debug panel. The faded parts keep updating. The **Focus on hover** checkbox next to Clear turns it off.
+
+Tk cannot blur or fade a widget, so `host/focus.py` lays a borderless window, 75% opaque and in the window's background colour, over each faded part; four thin blue windows draw the focused part's border. It reads the mouse position 12 times a second rather than Tk's enter and leave events, which also fire on child widgets and on the veils. In a gap between parts the focus stays where it was; outside the window, or with another app in front, nothing is faded. While the window is dragged the veils hide (Tk learns the window's new position only now and then, so veils moved along would trail behind it) and come back 0.25 s after it stops. A veil would take a click meant for the part under it, but the part comes into focus as soon as the mouse moves over it.
 
 ### The debug panel
 
@@ -185,12 +206,11 @@ With the panel, the window has a DeZog-style view on the right. Images go with `
 
 | Part | What it shows |
 | --- | --- |
-| Memory map | All of memory as named blocks in address order: Program, Weights, Image (`x`), Results (`trace`), Serial (`buf`, `line`), Debug (`stack_copy`, `regs`), Free, Stack. Each block has its own strip of accesses in DeZog's colours (read yellow, written red, code running blue), so small variables are as visible as the weights. White line and arrow: PC; green box: the memory window. Under it, one sentence says what the Z80 is doing (from the call stack) and which blocks it reads and writes. Hover for the address and symbol, click to show that address. |
+| Memory map | All of memory as named blocks in address order, each with its size: Program, Weights, Image (`x`), Results (`trace`), Serial (`buf`, `line`), Debug (`stack_copy`, `regs`), Free, Stack. Each block has its own strip of accesses in DeZog's colours (read yellow, written red, code running blue), so small variables are as visible as the weights. White line and arrow: PC; green box: the memory window. Under it, one sentence says what the Z80 is doing (from the call stack) and which blocks it reads and writes. Hover for the address and symbol, click to show that address. |
 | Registers | All registers, red when they changed since the previous snapshot; F and F' decoded (`SZ5H3PNC`). |
 | Call stack | PC, then the return addresses found through SDCC's IX frame chain (`_cmd_infer+0xB4`, `_main+0xE3`). |
 | Stack | Words from SP, with code addresses named; frame return addresses in blue. It scrolls, and keeps its place while the view refreshes. |
-| Memory | A window anywhere in the 64 KB. **Go to** a variable, SP or PC, or type an **Address** (hex, Enter); scroll with the wheel, PgUp/PgDn or the scroll bar (the bar is the whole 64 KB). Only the rows shown are read, so it works on the board too. **View**: *Hex*, 16 × 16 bytes and ASCII, each byte coloured by its access; or *Image 28×28*, 28 pixels per row like the MNIST frame, with a thin ring in the access colour. **Pixel** *1 byte* shows `x` (0/1: white = 1); other bytes are drawn as signed, + orange and − blue, so at `weights` each 28×28 is one hidden neuron's `W1q` row (PgDn: the next neuron). *1 bit* shows `buf`, the packed image the laptop sent. Go to picks the right one for `x` and `buf`. Hover the image for the address. In snapshot mode the first 3 bytes of `buf` hold the arguments of the panel's own last `M` command. **Refresh** reads it again. |
-| Scores | The 10 values of `acc2`, the winner in green. |
+| Memory | A window anywhere in the 64 KB. **Go to** a variable, SP or PC, or type an **Address** (hex, Enter); scroll with the wheel, PgUp/PgDn or the scroll bar (the bar is the whole 64 KB). Only the rows shown are read, so it works on the board too. **View**: *Hex*, 16 × 16 bytes and ASCII, each byte coloured by its access; or *Image 28×28*, 28 pixels per row like the MNIST frame, with a thin ring in the access colour. **Pixel** *1 byte* shows `x` (0/1: white = 1); other bytes are drawn as signed, + orange and − blue, so at `weights` each 28×28 is one hidden neuron's `W1q` row (PgDn: the next neuron). *1 bit* shows `buf`, the packed image the laptop sent. Go to picks the right one for `x` and `buf`. It opens on `x` as an image. Hover the image for the address (at `weights`: which neuron and pixel the weight belongs to). In snapshot mode the first 3 bytes of `buf` hold the arguments of the panel's own last `M` command. **Refresh** reads it again. |
 | Clock (live only) | The emulated clock: 100 kHz, 1 MHz, 3.5 MHz, 7.37 MHz (the board's), or max; **Pause** stops the Z80 between two instructions. Under it, the T-states of the current digit (from 0 at each Recognize), what they would take on the board, and the measured MHz (`idle` while the Z80 waits). A digit in the panel costs more than 5 million T-states: `D` also decodes the image and sends back every intermediate value. |
 
 **Live mode.** `make ticks-viz` copies z88dk's `src/ticks` into `build/ticks-viz`, applies `tools/ticks-viz.patch` and builds it there; the installed z88dk is not changed. The patch adds one option, `-shm <file>`: ticks keeps the emulated RAM in that file and marks there every access (bits read, write, prog, set in `get_memory()`/`put_memory()`), and publishes the registers and T-states about 100 times per emulated second. It also sleeps to match the clock the panel asks for, and waits while paused. `LiveSource` (`host/z80debug.py`) maps the same file; the panel shows the accesses fading out in about half a second, like DeZog. Without `-shm` the patched ticks behaves like the original. The weights always go up at full speed; the clock applies from the first digit. The patch is made for the z88dk sources installed here: if a newer z88dk no longer accepts it, `make ticks-viz` fails and the demo falls back to snapshots.
@@ -220,7 +240,10 @@ Start the "Z80 zsim" config in VS Code. It stops at the first instruction; set b
 | `host/z80nn.py` | The `Z80NN` bridge (section 3). |
 | `host/demo.py` | Connects `DrawingApp` to `Z80NN` (section 4), with the debug panel if asked. |
 | `host/z80debug.py` | `MapSymbols` (symbols and memory-map blocks from a z88dk `.map`), `SnapshotSource` (a `Snapshot` through `G`/`M`), `LiveSource` (a `Snapshot` from the patched ticks' shared file, plus clock and pause), the call-stack walk. No Tk. |
+| `host/focus.py` | `HoverFocus`: the part under the mouse in focus, the others faded (section 4). |
+| `host/network_view.py` | `NetworkView`, the network under the drawing: hidden neurons and scores, step by step (section 4). |
 | `host/debug_panel.py` | `DebugPanel`, the Tk view of a `Snapshot` (section 4). |
+| `host/ui_v1/` | Backup of the first UI (`draw.py`, `debug_panel.py`, `demo.py`), before the network view and the captions. `python host/ui_v1/demo.py` runs it, same arguments as `host/demo.py`. |
 | `tools/ticks-viz.patch` | The live-view patch for `z88dk-ticks`, built by `make ticks-viz` (section 4). |
 
 ## Tests
@@ -235,6 +258,6 @@ make check    # integer reference vs float model
 | Test | What it checks |
 | --- | --- |
 | `tests/test_preprocess.py` | The drawing preprocessing: empty input, bounding box, 20 px scaling, centering. |
-| `tests/test_z80debug.py` | The map parser on both builds (sizes, symbols, memory-map blocks, board layout), flag decoding, snapshots on both builds (scores, call stack, changed bytes), the order and errors of `draw.Worker`, the image decoding of `x` (bytes) and `buf` (bits) after a real inference, the panel's memory scrolling (wheel, pages, bar, wrap at `FFFF`), image view and the stack keeping its place, and Stop in `DrawingApp` (answer dropped, the next drawing run after it). |
-| `tests/test_ticks_viz.py` | The patched ticks, on both builds: all 105 test vectors with `-shm`; the upload seen as writes by `cmd_write`; layer 1 reading exactly the weight rows of lit pixels; no instruction fetched from data; the call stack down to `main` in the middle of an inference; `x` and `buf` as images; the per-digit T-states; the clock (2 MHz asked, at most 2.3 measured, so it is throttled) and Pause. Skipped without `make ticks-viz`. |
+| `tests/test_z80debug.py` | The map parser on both builds (sizes, symbols, memory-map blocks, board layout), flag decoding, snapshots on both builds (scores, call stack, changed bytes), the order and errors of `draw.Worker`, the image decoding of `x` (bytes) and `buf` (bits) after a real inference, `infer_step()` on both maps, the panel's memory scrolling (wheel, pages, bar, wrap at `FFFF`), image view (and a neuron's weights), focus on hover (veils, gaps, outside the window, off) and the stack keeping its place, and Stop in `DrawingApp` (answer dropped, the next drawing run after it). |
+| `tests/test_ticks_viz.py` | The patched ticks, on both builds: all 105 test vectors with `-shm`; the upload seen as writes by `cmd_write`; layer 1 reading exactly the weight rows of lit pixels; no instruction fetched from data; the call stack down to `main` in the middle of an inference; `infer_step()` following layer 1 neuron by neuron, then layer 2; `x` and `buf` as images; the per-digit T-states; the clock (2 MHz asked, at most 2.3 measured, so it is throttled) and Pause. Skipped without `make ticks-viz`. |
 | `tests/test_emu.py` | All 105 test vectors through `Z80NN` on the emulated Z80, for both `build/emu.bin` and `build/board.rom`: every `acc1`, `h_q`, `acc2` and digit must match Python. Also checks the register snapshot (`G`: PC inside `cmd_infer`, SP in the stack) and memory reads (`M`: the weights and the unpacked image), and that errors leave the firmware running. A build that is missing is skipped (`make emu rom`). |

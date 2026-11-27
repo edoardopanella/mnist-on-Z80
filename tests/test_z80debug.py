@@ -16,7 +16,7 @@ import pytest
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "host"))
 sys.path.insert(0, os.path.join(ROOT, "training"))
-from z80debug import WRITE, MapSymbols, SnapshotSource, flags  # noqa: E402
+from z80debug import READ, WRITE, MapSymbols, Snapshot, SnapshotSource, flags, infer_step  # noqa: E402
 
 WEIGHTS = os.path.join(ROOT, "artifacts", "weights.bin")
 TESTVEC = os.path.join(ROOT, "artifacts", "testvec.bin")
@@ -263,12 +263,38 @@ def fake_panel(tk, memory, stack_words=100):
     return root, panel, sym
 
 
+@pytest.mark.parametrize("build", BUILDS)
+def test_infer_step(build):
+    """Which layer and neuron, from the weight rows read and the call stack."""
+    sym = symbols_for(build)
+    w = sym["_weights"]
+
+    def step(reads=(), writes=(), frames=(("_layer1_neuron+0x10",),)):
+        activity = np.zeros(65536, np.uint8)
+        activity[list(reads)] |= READ
+        activity[list(writes)] |= WRITE
+        frames = [(0, f[0]) for f in frames]
+        return infer_step(Snapshot({}, [], frames, 0, b"", activity, [], live=True), sym)
+
+    assert step(reads=[w + 784 * 12 + 5, w + 784 * 12 + 700]) == ("layer1", 12)
+    assert step(reads=[w + 784 * 31 + 783]) == ("layer1", 31)
+    assert step(reads=[w + 25221 + 32 * 4 + 1]) == ("layer2", 4)                  # W2q row 4
+    assert step(reads=[w + 25221 - 1]) == ("", None)                              # shift: no row
+    assert step(writes=[sym["_trace"] + 3]) == ("trace", None)
+    assert step() == ("", None)
+    assert step(reads=[w + 784 * 3], frames=[("l_mult+0x2",), ("_nn_infer+0x40",)]) == ("layer1", 3)
+    assert step(reads=[w + 784 * 3], frames=[("_cmd_write+0x10",), ("_main+0x5",)]) is None
+
+
 def test_panel_memory_scrolling():
     tk = pytest.importorskip("tkinter")
     from types import SimpleNamespace
 
     root, panel, _ = fake_panel(tk, bytearray(65536))
     try:
+        assert panel.view_mode.get() == "image"                          # it opens on x, as an image
+        panel.view_mode.set("hex")
+        panel._on_view_mode()
         panel.set_view(0x1000)
         assert panel.snap.view_addr == 0x1000 and len(panel.snap.view) == 256
         panel._on_mem_wheel(SimpleNamespace(num=0, delta=-1))            # macOS: one step down
@@ -318,6 +344,63 @@ def test_panel_image_view():
         panel.view_mode.set("hex")
         panel._on_view_mode()
         assert len(panel.snap.view) == 256
+        panel.show_weights_of(5)                                         # a click in the network view
+        assert panel.view_addr == sym["_weights"] + 5 * 784 and panel.view_mode.get() == "image"
+        assert panel.pixel.get() == "byte" and len(panel.snap.view) == 784
+    finally:
+        root.destroy()
+
+
+def test_hover_focus():
+    """The part under the mouse in focus, veils on the others; gaps keep it; outside: none."""
+    tk = pytest.importorskip("tkinter")
+    from focus import HoverFocus
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        pytest.skip("no display")
+    try:
+        parts = [tk.Frame(root, width=100, height=60) for _ in range(3)]
+        for k, p in enumerate(parts):
+            p.grid(row=0, column=k, padx=10, pady=10)
+        root.update()
+        focus = HoverFocus(root, parts)
+        focus._app_active = lambda: True
+        shown = lambda: [v.state() == "normal" for v in focus.veils]
+        at = {}
+        root.winfo_pointerxy = lambda: at["xy"]
+
+        def point(x, y):
+            at["xy"] = (x, y)
+            focus._tick()
+            root.update()
+
+        p1 = parts[1]
+        point(p1.winfo_rootx() + 5, p1.winfo_rooty() + 5)
+        assert focus.current is p1 and shown() == [True, False, True]
+        assert all(side.state() == "normal" for side in focus.ring)
+        point(p1.winfo_rootx() - 5, p1.winfo_rooty() + 5)                # the gap before it
+        assert focus.current is p1 and shown() == [True, False, True]
+        old_pos = focus.root_pos
+        root.geometry(f"+{root.winfo_rootx() + 40}+{root.winfo_rooty() + 20}")   # dragged
+        deadline = time.monotonic() + 1.0       # macOS reports the move a few ms later
+        while focus.root_pos == old_pos and time.monotonic() < deadline:
+            root.update()
+            time.sleep(0.01)
+        assert shown() == [False] * 3                                    # hidden at once
+        point(p1.winfo_rootx() + 5, p1.winfo_rooty() + 5)
+        assert shown() == [False] * 3                                    # still settling
+        focus.moved_at -= 1                                              # ... it stopped
+        point(p1.winfo_rootx() + 5, p1.winfo_rooty() + 5)
+        assert focus.current is p1 and shown() == [True, False, True]
+        assert focus.veils[0].winfo_rootx() == parts[0].winfo_rootx()   # at the new place
+        point(root.winfo_rootx() - 50, root.winfo_rooty() - 50)          # outside the window
+        assert focus.current is None and shown() == [False] * 3
+        assert all(side.state() == "withdrawn" for side in focus.ring)
+        point(parts[0].winfo_rootx() + 5, parts[0].winfo_rooty() + 5)
+        focus.set_enabled(False)
+        root.update()
+        assert focus.current is None and shown() == [False] * 3
     finally:
         root.destroy()
 
