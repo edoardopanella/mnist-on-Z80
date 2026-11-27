@@ -13,7 +13,7 @@ Handwritten digit recognition on an 8-bit Z80 processor. You draw a digit on the
 | Integer (Python reference, and the Z80) | 95.96% |
 | Float and integer give the same digit | 99.67% |
 
-One classification takes about 5 million Z80 clock cycles: about 0.7 s at 7.3728 MHz, the clock of the board the firmware is meant for.
+One classification takes about 4.6 million Z80 clock cycles (4.1 to 5.5 million on 100 MNIST test digits): about 0.6 s at 7.3728 MHz, the clock of the board the firmware is meant for.
 
 Federico Scaffidi Muta, Edoardo Panella. Software Engineering (20875) project, Bocconi University, Fall 2026.
 

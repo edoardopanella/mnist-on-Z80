@@ -171,7 +171,7 @@ def test_speed_holds_the_clock(live):
 
 
 def test_tstates_per_digit(live):
-    """One inference takes about 5M T-states, and the same number every time."""
+    """A digit sent with D takes about 7M T-states (I: about 4.6M), and the same number every time."""
     z80, src = live
     x = records()[2]["x"]
     costs = []
