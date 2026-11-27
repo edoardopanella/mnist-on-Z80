@@ -106,7 +106,7 @@ $(VIZ_TICKS): tools/ticks-viz.patch
 
 ifdef PORT
 demo: $(ART)/weights.bin
-	$(PYTHON) host/demo.py boa\rd $(PORT) $(if $(DEBUG),--debug)
+	$(PYTHON) host/demo.py board $(PORT) $(if $(DEBUG),--debug)
 else
 demo: emu $(ART)/weights.bin
 	$(PYTHON) host/demo.py
