@@ -11,8 +11,6 @@ model/
 *.pth
 *.onnx
 *.npz
-weights.bin
-testvec.bin
 
 # C build output (gcc and z88dk)
 build/
